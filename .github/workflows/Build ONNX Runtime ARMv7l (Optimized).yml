@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Fixed Bash Execution)
+name: Build onnxruntime for ARMv7l (Stable v1.15.0)
 
 on:
   workflow_dispatch:
@@ -7,7 +7,8 @@ on:
       - '.github/workflows/build-onnxruntime-armv7.yml'
 
 env:
-  ONNXRUNTIME_VERSION: "1.19.0"
+  # 🔥 降级到 1.15.0，这是社区验证过对 ARMv7 支持最好的版本之一
+  ONNXRUNTIME_VERSION: "1.15.0"
   PYTHON_VERSION: "3.11"
   NUMPY_VERSION: "1.23.5"
 
@@ -31,7 +32,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/pip
-          key: ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-numpy${{ env.NUMPY_VERSION }}-${{ hashFiles('Dockerfile.build') }}
+          key: ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-numpy${{ env.NUMPY_VERSION }}-onnx${{ env.ONNXRUNTIME_VERSION }}
           restore-keys: |
             ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-
 
@@ -49,7 +50,7 @@ jobs:
           NUMPY_VER="${{ env.NUMPY_VERSION }}"
           PY_VER="${{ env.PYTHON_VERSION }}"
 
-          echo "Building ONNX Runtime ${ONNX_VER} with Numpy ${NUMPY_VER} for Python ${PY_VER}"
+          echo "Building ONNX Runtime ${ONNX_VER} (ARMv7 Stable) with Numpy ${NUMPY_VER}"
 
           cat <<EOF > Dockerfile.build
           FROM python:${PY_VER}-bullseye AS builder
@@ -57,6 +58,7 @@ jobs:
           ENV DEBIAN_FRONTEND=noninteractive
 
           # 1. 安装系统依赖
+          # 注意：armv7 需要 gcc/g++ 多架构支持，但 bullseye 默认通常够用
           RUN apt-get update && apt-get install -y \
               build-essential \
               cmake \
@@ -71,19 +73,20 @@ jobs:
               gfortran \
               && rm -rf /var/lib/apt/lists/*
 
-          # 2. 配置 Ccache
+          # 2. 配置 Ccache (通过环境变量生效，无需 build.sh 参数)
           ENV CCACHE_DIR=/tmp/ccache
+          ENV CCACHE_MAXSIZE=1G
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
           # 3. 升级 pip 并安装轻量依赖
           RUN pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
 
-          # 4. 编译/安装 Numpy (已启用缓存)
+          # 4. 编译/安装 Numpy (利用缓存)
           ENV NPY_BLAS_LIBS="-lopenblas"
           ENV NPY_LAPACK_LIBS="-lopenblas"
           RUN pip install numpy==${NUMPY_VER}
 
-          # 5. 下载 OnnxRuntime
+          # 5. 下载 OnnxRuntime (指定稳定版本)
           WORKDIR /source
           RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VER}.tar.gz && \
               tar xzf v${ONNX_VER}.tar.gz && \
@@ -91,23 +94,30 @@ jobs:
 
           WORKDIR /source/onnxruntime
 
-          # 6. 🔥 关键修复：使用 bash 运行 build.sh，而不是 python 或 sh
-          # build.sh 是 Bash 脚本，必须用 bash 解释器执行
+          # 6. 🔥 执行编译 (适配 1.15.0 参数)
+          # 变更说明：
+          # 1. 移除了 --arm_version (1.14 在 armv7 上通常自动识别，或通过 CMake 定义)
+          # 2. 移除了 --use_openblas (改用 --cmake_extra_defines 指定 BLAS)
+          # 3. 移除了 --use_ccache (CMake 会自动检测 ccache，如果 gcc 链接了它)
+          # 4. 添加 --cmake_extra_defines 来强制指定 ARMv7 架构和 OpenBLAS
+          
           RUN bash build.sh \
               --config Release \
               --update \
               --build \
               --build_wheel \
-              --use_openblas \
-              --arm_version 7 \
               --skip_tests \
               --enable_pybind \
-              --use_ccache \
-              --parallel 2
+              --parallel 2 \
+              --cmake_extra_defines \
+                  CMAKE_SYSTEM_PROCESSOR=armv7l \
+                  onnxruntime_USE_FULL_PROTOBUF=OFF \
+                  onnxruntime_BUILD_SHARED_LIB=OFF \
+                  onnxruntime_USE_OPENBLAS=ON
 
           # 7. 输出
           WORKDIR /source/onnxruntime/build/Linux/Release/dist
-          RUN ls -lh *.whl
+          RUN ls -lh *.whl || (echo "Build failed, checking logs..." && exit 1)
           RUN mkdir -p /output && cp *.whl /output/
           EOF
 
