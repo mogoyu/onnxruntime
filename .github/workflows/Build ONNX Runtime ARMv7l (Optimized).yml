@@ -59,7 +59,6 @@ jobs:
           # 1. 安装系统依赖
           RUN apt-get update && apt-get install -y \
               build-essential \
-              cmake \
               git \
               wget \
               libssl-dev \
@@ -76,8 +75,12 @@ jobs:
           ENV CCACHE_MAXSIZE=1G
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
-          # 3. 升级 pip 并安装轻量依赖
+          # 3. 升级 pip 并安装构建工具（✅ 包含新版 CMake 3.26+）
           RUN pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
+          RUN pip install "cmake>=3.26"
+
+          # 验证 CMake 版本
+          RUN cmake --version
 
           # 4. 编译/安装 Numpy (利用缓存)
           ENV NPY_BLAS_LIBS="-lopenblas"
