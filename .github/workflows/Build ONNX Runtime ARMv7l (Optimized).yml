@@ -109,6 +109,7 @@ jobs:
               --skip_tests \
               --enable_pybind \
               --parallel 2 \
+              --allow_running_as_root \
               --cmake_extra_defines \
                   CMAKE_SYSTEM_PROCESSOR=armv7l \
                   onnxruntime_USE_FULL_PROTOBUF=OFF \
