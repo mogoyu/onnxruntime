@@ -7,7 +7,6 @@ on:
       - '.github/workflows/build-onnxruntime-armv7.yml'
 
 env:
-  # 🔥 降级到 1.15.0，这是社区验证过对 ARMv7 支持最好的版本之一
   ONNXRUNTIME_VERSION: "1.15.0"
   PYTHON_VERSION: "3.11"
   NUMPY_VERSION: "1.23.5"
@@ -58,7 +57,6 @@ jobs:
           ENV DEBIAN_FRONTEND=noninteractive
 
           # 1. 安装系统依赖
-          # 注意：armv7 需要 gcc/g++ 多架构支持，但 bullseye 默认通常够用
           RUN apt-get update && apt-get install -y \
               build-essential \
               cmake \
@@ -73,7 +71,7 @@ jobs:
               gfortran \
               && rm -rf /var/lib/apt/lists/*
 
-          # 2. 配置 Ccache (通过环境变量生效，无需 build.sh 参数)
+          # 2. 配置 Ccache
           ENV CCACHE_DIR=/tmp/ccache
           ENV CCACHE_MAXSIZE=1G
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
@@ -86,7 +84,7 @@ jobs:
           ENV NPY_LAPACK_LIBS="-lopenblas"
           RUN pip install numpy==${NUMPY_VER}
 
-          # 5. 下载 OnnxRuntime (指定稳定版本)
+          # 5. 下载 OnnxRuntime
           WORKDIR /source
           RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VER}.tar.gz && \
               tar xzf v${ONNX_VER}.tar.gz && \
@@ -94,13 +92,7 @@ jobs:
 
           WORKDIR /source/onnxruntime
 
-          # 6. 🔥 执行编译 (适配 1.15.0 参数)
-          # 变更说明：
-          # 1. 移除了 --arm_version (1.14 在 armv7 上通常自动识别，或通过 CMake 定义)
-          # 2. 移除了 --use_openblas (改用 --cmake_extra_defines 指定 BLAS)
-          # 3. 移除了 --use_ccache (CMake 会自动检测 ccache，如果 gcc 链接了它)
-          # 4. 添加 --cmake_extra_defines 来强制指定 ARMv7 架构和 OpenBLAS
-          
+          # 6. 执行编译 (✅ 最终修正版本)
           RUN bash build.sh \
               --config Release \
               --update \
@@ -110,6 +102,7 @@ jobs:
               --enable_pybind \
               --parallel 2 \
               --allow_running_as_root \
+              --skip_submodule_sync \
               --cmake_extra_defines \
                   CMAKE_SYSTEM_PROCESSOR=armv7l \
                   onnxruntime_USE_FULL_PROTOBUF=OFF \
