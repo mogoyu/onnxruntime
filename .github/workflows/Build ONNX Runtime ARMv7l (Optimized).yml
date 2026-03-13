@@ -1,0 +1,89 @@
+name: Build ONNX Runtime ARMv7l (Optimized)
+
+on:
+  workflow_dispatch:
+    inputs:
+      onnxruntime_version:
+        description: 'ONNX Runtime tag'
+        default: 'v1.24.0'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Install cross-compilation tools
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          gcc-arm-linux-gnueabihf \
+          g++-arm-linux-gnueabihf \
+          qemu-user-static \
+          binfmt-support
+        
+        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
+        
+    - name: Build in ARMv7 container
+      run: |
+        mkdir -p output
+        
+        # 使用多阶段构建减少时间
+        cat > Dockerfile.build << 'EOF'
+        FROM arm32v7/python:3.11-slim-bookworm as builder
+        
+        RUN apt-get update && apt-get install -y \
+            build-essential cmake git ninja-build \
+            python3-dev libprotobuf-dev protobuf-compiler \
+            pkg-config wget && \
+            rm -rf /var/lib/apt/lists/*
+        
+        WORKDIR /build
+        ARG ONNX_VERSION=v1.24.0
+        
+        # 下载源码而不是完整克隆（节省时间和空间）
+        RUN pip install --no-cache-dir numpy wheel setuptools && \
+            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/${ONNX_VERSION}.tar.gz && \
+            tar xzf ${ONNX_VERSION}.tar.gz && \
+            mv onnxruntime-* onnxruntime
+        
+        WORKDIR /build/onnxruntime
+        
+        # 使用最小化构建配置
+        RUN ./build.sh \
+            --config MinSizeRel \
+            --build_wheel \
+            --skip_tests \
+            --parallel 2 \
+            --cmake_extra_defines \
+              CMAKE_SYSTEM_NAME=Linux \
+              CMAKE_SYSTEM_PROCESSOR=armv7l \
+              CMAKE_C_COMPILER=gcc \
+              CMAKE_CXX_COMPILER=g++ \
+              CMAKE_C_FLAGS="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard" \
+              CMAKE_CXX_FLAGS="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard" \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              onnxruntime_USE_XNNPACK=ON \
+              onnxruntime_USE_CPUINFO=ON \
+              onnxruntime_GIT_SHA=none \
+              PYTHON_EXECUTABLE=/usr/local/bin/python3
+        
+        RUN cp /build/onnxruntime/build/Linux/MinSizeRel/dist/*.whl /tmp/
+        
+        FROM scratch as export
+        COPY --from=builder /tmp/*.whl /
+        EOF
+        
+        docker buildx build \
+          --platform linux/arm/v7 \
+          --build-arg ONNX_VERSION=${{ github.event.inputs.onnxruntime_version }} \
+          --output type=local,dest=./output \
+          -f Dockerfile.build .
+          
+    - name: Upload artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: onnxruntime-armv7l
+        path: output/*.whl
