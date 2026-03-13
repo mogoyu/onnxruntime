@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Py3.11 Final Fix)
+name: Build onnxruntime for ARMv7l (Cached Numpy & Fixed URL)
 
 on:
   workflow_dispatch:
@@ -27,6 +27,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
+      # 🔥 缓存 Pip (包含编译好的 numpy wheel)
       - name: Cache Pip Packages
         uses: actions/cache@v4
         with:
@@ -35,6 +36,7 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-
 
+      # 🔥 缓存 C++ 编译对象 (ccache)
       - name: Cache CCache
         uses: actions/cache@v4
         with:
@@ -45,13 +47,17 @@ jobs:
 
       - name: Build Wheel
         run: |
-          # 🔥 关键修复：直接使用 GitHub Actions 变量替换 Dockerfile 内容
-          # 这样 Dockerfile 里就是具体的版本号，不再依赖运行时环境变量
-          cat <<EOF > Dockerfile.build
-          FROM python:${{ env.PYTHON_VERSION }}-bullseye AS builder
+          # 🔥 关键技巧：定义 Shell 变量，利用 GitHub Actions 注入具体值
+          # 这样在下面的 cat 中，${ONNX_VER} 会被替换为 "1.19.0"
+          ONNX_VER="${{ env.ONNXRUNTIME_VERSION }}"
+          NUMPY_VER="${{ env.NUMPY_VERSION }}"
+          PY_VER="${{ env.PYTHON_VERSION }}"
 
-          # 硬编码版本号，避免 Docker 构建时变量丢失
-          ARG ONNX_VERSION=${{ env.ONNXRUNTIME_VERSION }}
+          echo "Building ONNX Runtime ${ONNX_VER} with Numpy ${NUMPY_VER} for Python ${PY_VER}"
+
+          cat <<EOF > Dockerfile.build
+          FROM python:${PY_VER}-bullseye AS builder
+
           ENV DEBIAN_FRONTEND=noninteractive
 
           # 1. 安装系统依赖
@@ -73,20 +79,22 @@ jobs:
           ENV CCACHE_DIR=/tmp/ccache
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
-          # 3. 升级 pip 并安装其他轻量依赖
+          # 3. 升级 pip 并安装轻量依赖
           RUN pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
 
-          # 4. 编译安装 numpy (指定兼容版本)
+          # 4. 🔥 编译/安装 Numpy
+          # ✅ 修改点：去掉了 --no-cache-dir，允许 pip 读写缓存
+          # 第一次会慢（编译），之后会从 ~/.cache/pip 读取编译好的 wheel
           ENV NPY_BLAS_LIBS="-lopenblas"
           ENV NPY_LAPACK_LIBS="-lopenblas"
-          RUN pip install --no-cache-dir numpy==${{ env.NUMPY_VERSION }}
+          RUN pip install numpy==${NUMPY_VER}
 
-          # 5. 下载 onnxruntime 源码
-          # 此时 ONNX_VERSION 已经是具体值 (如 1.19.0)，或者我们在 wget 中直接使用硬编码值更稳妥
+          # 5. 🔥 下载 OnnxRuntime (版本号已硬编码，不再是变量)
           WORKDIR /source
-          RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VERSION}.tar.gz && \
-              tar xzf v${ONNX_VERSION}.tar.gz && \
-              mv onnxruntime-\${ONNX_VERSION} onnxruntime
+          # 这里的 ${ONNX_VER} 在 cat 执行前已经被 Shell 替换成了具体数字 (如 1.19.0)
+          RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VER}.tar.gz && \
+              tar xzf v${ONNX_VER}.tar.gz && \
+              mv onnxruntime-${ONNX_VER} onnxruntime
 
           WORKDIR /source/onnxruntime
 
@@ -103,11 +111,16 @@ jobs:
               --use_ccache \
               --parallel 2
 
-          # 7. 准备输出
+          # 7. 输出
           WORKDIR /source/onnxruntime/build/Linux/Release/dist
           RUN ls -lh *.whl
           RUN mkdir -p /output && cp *.whl /output/
           EOF
+
+          # 打印生成的 Dockerfile 以便调试 (确认版本号是否正确)
+          echo "--- Generated Dockerfile ---"
+          cat Dockerfile.build
+          echo "--------------------------"
 
           mkdir -p output
 
