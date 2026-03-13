@@ -9,8 +9,7 @@ on:
 env:
   ONNXRUNTIME_VERSION: "1.19.0"
   PYTHON_VERSION: "3.11"
-  # 使用对 ARMv7 兼容性最好的 numpy 版本
-  NUMPY_VERSION: "1.23.5" 
+  NUMPY_VERSION: "1.23.5"
 
 jobs:
   build:
@@ -46,14 +45,16 @@ jobs:
 
       - name: Build Wheel
         run: |
+          # 🔥 关键修复：直接使用 GitHub Actions 变量替换 Dockerfile 内容
+          # 这样 Dockerfile 里就是具体的版本号，不再依赖运行时环境变量
           cat <<EOF > Dockerfile.build
           FROM python:${{ env.PYTHON_VERSION }}-bullseye AS builder
 
+          # 硬编码版本号，避免 Docker 构建时变量丢失
           ARG ONNX_VERSION=${{ env.ONNXRUNTIME_VERSION }}
           ENV DEBIAN_FRONTEND=noninteractive
 
           # 1. 安装系统依赖
-          # 重点：添加 gfortran 和 libopenblas-dev 以加速 numpy 源码编译
           RUN apt-get update && apt-get install -y \
               build-essential \
               cmake \
@@ -73,26 +74,23 @@ jobs:
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
           # 3. 升级 pip 并安装其他轻量依赖
-          # 注意：numpy 单独处理，因为需要源码编译
           RUN pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
 
-          # 4. 🔥 关键：从源码编译安装 numpy (指定兼容版本)
-          # 移除 --only-binary，允许编译。
-          # 设置 NPY_BLAS_LIBS 指向 openblas，避免复杂的自动检测
+          # 4. 编译安装 numpy (指定兼容版本)
           ENV NPY_BLAS_LIBS="-lopenblas"
           ENV NPY_LAPACK_LIBS="-lopenblas"
           RUN pip install --no-cache-dir numpy==${{ env.NUMPY_VERSION }}
 
           # 5. 下载 onnxruntime 源码
+          # 此时 ONNX_VERSION 已经是具体值 (如 1.19.0)，或者我们在 wget 中直接使用硬编码值更稳妥
           WORKDIR /source
           RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VERSION}.tar.gz && \
               tar xzf v${ONNX_VERSION}.tar.gz && \
-              mv onnxruntime-${ONNX_VERSION} onnxruntime
+              mv onnxruntime-\${ONNX_VERSION} onnxruntime
 
           WORKDIR /source/onnxruntime
 
           # 6. 执行编译
-          # --parallel 2 : 严格限制并发，防止 OOM
           RUN python build.sh \
               --config Release \
               --update \
