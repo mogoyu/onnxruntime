@@ -7,9 +7,8 @@ on:
       - '.github/workflows/build-onnxruntime-armv7.yml'
 
 env:
-  ONNXRUNTIME_VERSION: "1.19.0" # 使用较新版本，修复了一些旧版编译bug
+  ONNXRUNTIME_VERSION: "1.19.0"
   PYTHON_VERSION: "3.11"
-  TARGET_ARCH: "armv7l"
 
 jobs:
   build:
@@ -27,7 +26,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      # 🔥 关键优化 1: 缓存 Pip 依赖
       - name: Cache Pip Packages
         uses: actions/cache@v4
         with:
@@ -36,7 +34,6 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-
 
-      # 🔥 关键优化 2: 缓存 CCache (C++ 编译缓存)，这是加速核心
       - name: Cache CCache
         uses: actions/cache@v4
         with:
@@ -48,12 +45,13 @@ jobs:
       - name: Build Wheel
         run: |
           cat <<EOF > Dockerfile.build
-          FROM --platform=linux/arm/v7 python:${{ env.PYTHON_VERSION }}-bullseye
+          # ✅ 修复：添加 AS builder 标签，并移除硬编码的 platform (由 buildx 控制)
+          FROM python:${{ env.PYTHON_VERSION }}-bullseye AS builder
 
           ARG ONNX_VERSION=${{ env.ONNXRUNTIME_VERSION }}
           ENV DEBIAN_FRONTEND=noninteractive
 
-          # 1. 安装系统依赖 (包含 ccache 用于加速编译)
+          # 1. 安装系统依赖
           RUN apt-get update && apt-get install -y \
               build-essential \
               cmake \
@@ -71,12 +69,10 @@ jobs:
           ENV CCACHE_DIR=/tmp/ccache
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
-          # 3. 🔥 关键优化：直接安装预编译的 numpy wheel，避免在容器内耗时编译
-          # python:3.11-bullseye (Debian) 的 pip 通常能直接拉到 armv7 的 binary wheel
-          # 如果拉不到，我们指定一个已知存在的版本，而不是让它从源码编译
+          # 3. 安装预编译的 numpy (避免源码编译耗时)
           RUN pip install --only-binary=:all: numpy==1.26.4 setuptools wheel cython packaging sympy flatbuffers
 
-          # 4. 下载源码 (使用浅克隆节省时间)
+          # 4. 下载 onnxruntime 源码
           WORKDIR /source
           RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VERSION}.tar.gz && \
               tar xzf v${ONNX_VERSION}.tar.gz && \
@@ -85,8 +81,8 @@ jobs:
           WORKDIR /source/onnxruntime
 
           # 5. 执行编译
-          # --parallel 2 : 严格限制并发，防止 QEMU 内存溢出 (Exit Code 8 的主要原因)
-          # --use_ccache : 启用刚才配置的 ccache
+          # --parallel 2 : 防止 OOM
+          # --use_ccache : 启用缓存加速
           RUN python build.sh \
               --config Release \
               --update \
@@ -99,7 +95,7 @@ jobs:
               --use_ccache \
               --parallel 2
 
-          # 6. 输出结果
+          # 6. 准备输出
           WORKDIR /source/onnxruntime/build/Linux/Release/dist
           RUN ls -lh *.whl
           RUN mkdir -p /output && cp *.whl /output/
@@ -107,13 +103,13 @@ jobs:
 
           mkdir -p output
 
-          # 构建镜像
-          # --progress=plain 让日志更清晰，方便排查
+          # ✅ 修复：移除 --target builder (因为只有一个阶段，默认就是它)，或者保留但确保 Dockerfile 里有 AS builder
+          # 这里我们显式指定 --target builder 以匹配 Dockerfile 中的 AS builder
           docker buildx build \
             --platform linux/arm/v7 \
-            --target builder \
             --load \
             --progress=plain \
+            --target builder \
             -t onnxruntime-armv7-builder \
             -f Dockerfile.build .
 
