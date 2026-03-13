@@ -1,89 +1,133 @@
-name: Build ONNX Runtime ARMv7l (Optimized)
+name: Build onnxruntime for ARMv7l (Py3.11 Optimized)
 
 on:
   workflow_dispatch:
-    inputs:
-      onnxruntime_version:
-        description: 'ONNX Runtime tag'
-        default: 'v1.24.0'
-        required: true
+  push:
+    paths:
+      - '.github/workflows/build-onnxruntime-armv7.yml'
+
+env:
+  ONNXRUNTIME_VERSION: "1.19.0" # 使用较新版本，修复了一些旧版编译bug
+  PYTHON_VERSION: "3.11"
+  TARGET_ARCH: "armv7l"
 
 jobs:
   build:
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     
     steps:
-    - uses: actions/checkout@v4
-    
-    - name: Install cross-compilation tools
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          gcc-arm-linux-gnueabihf \
-          g++-arm-linux-gnueabihf \
-          qemu-user-static \
-          binfmt-support
-        
-        docker run --rm --privileged multiarch/qemu-user-static --reset -p yes
-        
-    - name: Build in ARMv7 container
-      run: |
-        mkdir -p output
-        
-        # 使用多阶段构建减少时间
-        cat > Dockerfile.build << 'EOF'
-        FROM arm32v7/python:3.11-slim-bookworm as builder
-        
-        RUN apt-get update && apt-get install -y \
-            build-essential cmake git ninja-build \
-            python3-dev libprotobuf-dev protobuf-compiler \
-            pkg-config wget && \
-            rm -rf /var/lib/apt/lists/*
-        
-        WORKDIR /build
-        ARG ONNX_VERSION=v1.24.0
-        
-        # 下载源码而不是完整克隆（节省时间和空间）
-        RUN pip install --no-cache-dir numpy wheel setuptools && \
-            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/${ONNX_VERSION}.tar.gz && \
-            tar xzf ${ONNX_VERSION}.tar.gz && \
-            mv onnxruntime-* onnxruntime
-        
-        WORKDIR /build/onnxruntime
-        
-        # 使用最小化构建配置
-        RUN ./build.sh \
-            --config MinSizeRel \
-            --build_wheel \
-            --skip_tests \
-            --parallel 2 \
-            --cmake_extra_defines \
-              CMAKE_SYSTEM_NAME=Linux \
-              CMAKE_SYSTEM_PROCESSOR=armv7l \
-              CMAKE_C_COMPILER=gcc \
-              CMAKE_CXX_COMPILER=g++ \
-              CMAKE_C_FLAGS="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard" \
-              CMAKE_CXX_FLAGS="-O2 -march=armv7-a -mfpu=neon-vfpv4 -mfloat-abi=hard" \
-              onnxruntime_BUILD_UNIT_TESTS=OFF \
-              onnxruntime_USE_XNNPACK=ON \
-              onnxruntime_USE_CPUINFO=ON \
-              onnxruntime_GIT_SHA=none \
-              PYTHON_EXECUTABLE=/usr/local/bin/python3
-        
-        RUN cp /build/onnxruntime/build/Linux/MinSizeRel/dist/*.whl /tmp/
-        
-        FROM scratch as export
-        COPY --from=builder /tmp/*.whl /
-        EOF
-        
-        docker buildx build \
-          --platform linux/arm/v7 \
-          --build-arg ONNX_VERSION=${{ github.event.inputs.onnxruntime_version }} \
-          --output type=local,dest=./output \
-          -f Dockerfile.build .
-          
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: onnxruntime-armv7l
-        path: output/*.whl
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm/v7
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # 🔥 关键优化 1: 缓存 Pip 依赖
+      - name: Cache Pip Packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-${{ hashFiles('Dockerfile.build') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-${{ env.PYTHON_VERSION }}-armv7-
+
+      # 🔥 关键优化 2: 缓存 CCache (C++ 编译缓存)，这是加速核心
+      - name: Cache CCache
+        uses: actions/cache@v4
+        with:
+          path: /tmp/ccache
+          key: ${{ runner.os }}-ccache-armv7-${{ env.ONNXRUNTIME_VERSION }}-${{ github.run_id }}
+          restore-keys: |
+            ${{ runner.os }}-ccache-armv7-${{ env.ONNXRUNTIME_VERSION }}-
+
+      - name: Build Wheel
+        run: |
+          cat <<EOF > Dockerfile.build
+          FROM --platform=linux/arm/v7 python:${{ env.PYTHON_VERSION }}-bullseye
+
+          ARG ONNX_VERSION=${{ env.ONNXRUNTIME_VERSION }}
+          ENV DEBIAN_FRONTEND=noninteractive
+
+          # 1. 安装系统依赖 (包含 ccache 用于加速编译)
+          RUN apt-get update && apt-get install -y \
+              build-essential \
+              cmake \
+              git \
+              wget \
+              libssl-dev \
+              libffi-dev \
+              libopenblas-dev \
+              libeigen3-dev \
+              pkg-config \
+              ccache \
+              && rm -rf /var/lib/apt/lists/*
+
+          # 2. 配置 Ccache
+          ENV CCACHE_DIR=/tmp/ccache
+          RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
+
+          # 3. 🔥 关键优化：直接安装预编译的 numpy wheel，避免在容器内耗时编译
+          # python:3.11-bullseye (Debian) 的 pip 通常能直接拉到 armv7 的 binary wheel
+          # 如果拉不到，我们指定一个已知存在的版本，而不是让它从源码编译
+          RUN pip install --only-binary=:all: numpy==1.26.4 setuptools wheel cython packaging sympy flatbuffers
+
+          # 4. 下载源码 (使用浅克隆节省时间)
+          WORKDIR /source
+          RUN wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${ONNX_VERSION}.tar.gz && \
+              tar xzf v${ONNX_VERSION}.tar.gz && \
+              mv onnxruntime-${ONNX_VERSION} onnxruntime
+
+          WORKDIR /source/onnxruntime
+
+          # 5. 执行编译
+          # --parallel 2 : 严格限制并发，防止 QEMU 内存溢出 (Exit Code 8 的主要原因)
+          # --use_ccache : 启用刚才配置的 ccache
+          RUN python build.sh \
+              --config Release \
+              --update \
+              --build \
+              --build_wheel \
+              --use_openblas \
+              --arm_version 7 \
+              --skip_tests \
+              --enable_pybind \
+              --use_ccache \
+              --parallel 2
+
+          # 6. 输出结果
+          WORKDIR /source/onnxruntime/build/Linux/Release/dist
+          RUN ls -lh *.whl
+          RUN mkdir -p /output && cp *.whl /output/
+          EOF
+
+          mkdir -p output
+
+          # 构建镜像
+          # --progress=plain 让日志更清晰，方便排查
+          docker buildx build \
+            --platform linux/arm/v7 \
+            --target builder \
+            --load \
+            --progress=plain \
+            -t onnxruntime-armv7-builder \
+            -f Dockerfile.build .
+
+          # 提取文件
+          CONTAINER_ID=$(docker create onnxruntime-armv7-builder)
+          docker cp $CONTAINER_ID:/output/. ./output/
+          docker rm $CONTAINER_ID
+
+          echo "✅ Build Finished!"
+          ls -lh output/
+
+      - name: Upload Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}
+          path: output/*.whl
+          retention-days: 14
