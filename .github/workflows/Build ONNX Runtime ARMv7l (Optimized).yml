@@ -75,7 +75,7 @@ jobs:
           ENV CCACHE_MAXSIZE=1G
           RUN mkdir -p \$CCACHE_DIR && ln -s /usr/bin/ccache /usr/local/bin/gcc && ln -s /usr/bin/ccache /usr/local/bin/g++
 
-          # 3. 升级 pip 并安装构建工具（✅ 包含新版 CMake 3.26+）
+          # 3. 升级 pip 并安装构建工具（包含新版 CMake 3.26+）
           RUN pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           RUN pip install "cmake>=3.26"
 
@@ -95,7 +95,7 @@ jobs:
 
           WORKDIR /source/onnxruntime
 
-          # 6. 执行编译 (✅ 最终修正版本)
+          # 6. 执行编译 (✅ 最终修正版本 - 添加 CMAKE_POLICY_VERSION_MINIMUM)
           RUN bash build.sh \
               --config Release \
               --update \
@@ -108,6 +108,7 @@ jobs:
               --skip_submodule_sync \
               --cmake_extra_defines \
                   CMAKE_SYSTEM_PROCESSOR=armv7l \
+                  CMAKE_POLICY_VERSION_MINIMUM=3.5 \
                   onnxruntime_USE_FULL_PROTOBUF=OFF \
                   onnxruntime_BUILD_SHARED_LIB=OFF \
                   onnxruntime_USE_OPENBLAS=ON
