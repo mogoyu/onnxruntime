@@ -32,7 +32,7 @@ jobs:
             wget -q https://www.python.org/ftp/python/\$PYTHON_VERSION/Python-\$PYTHON_VERSION.tar.xz
             tar -xf Python-\$PYTHON_VERSION.tar.xz
 
-            # 1. 编译本机 Python
+            # 1. 编译本机 Python（host版本）
             (
               cd Python-\$PYTHON_VERSION
               unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
@@ -43,7 +43,7 @@ jobs:
               make install
             )
 
-            # 2. 交叉编译目标 Python
+            # 2. 交叉编译目标 Python，安装到 sysroot
             rm -rf Python-\$PYTHON_VERSION
             tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
@@ -51,10 +51,11 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
+            # 安装到 sysroot 下
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
-              --prefix=/usr/local \
+              --prefix=/usr/armv7-unknown-linux-gnueabi/usr \
               --with-build-python=/opt/host-python/bin/python3.11 \
               --enable-optimizations \
               --with-system-expat \
@@ -89,7 +90,7 @@ jobs:
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
 
-            # 手动下载 Eigen
+            # 手动下载 Eigen（避免网络校验失败）
             EIGEN_COMMIT=\"e7248b26a1ed53fa030c5c459f7ea095dfd276ac\"
             EIGEN_DIR=\"/opt/eigen-src\"
             mkdir -p \$EIGEN_DIR
@@ -99,6 +100,7 @@ jobs:
             rm -rf /opt/eigen-\$EIGEN_COMMIT
             rm /tmp/eigen.zip
 
+            # 现在目标 Python 已安装到 sysroot，CMake 会自动找到它
             python3.11 tools/ci_build/build.py \
               --build_dir build \
               --config Release \
@@ -109,8 +111,6 @@ jobs:
                 CMAKE_MAKE_PROGRAM=/usr/bin/make \
                 onnxruntime_USE_OPENMP=ON \
                 FETCHCONTENT_SOURCE_DIR_EIGEN=\$EIGEN_DIR \
-                PYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
-                PYTHON_LIBRARY=/usr/local/lib/libpython3.11.so \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
