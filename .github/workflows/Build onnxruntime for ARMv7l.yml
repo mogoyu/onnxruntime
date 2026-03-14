@@ -23,11 +23,12 @@ jobs:
         run: |
           ./dockcross bash -c "
             set -e
-            # 安装编译 Python 和 ONNX Runtime 所需的依赖
+            # 安装编译 Python 和 ONNX Runtime 所需的依赖，包括 libexpat1-dev
             apt-get update && apt-get install -y --no-install-recommends \
               wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
-              cmake make
+              cmake make \
+              libexpat1-dev
 
             # 下载 Python 源码
             PYTHON_VERSION=3.11.9
@@ -35,7 +36,6 @@ jobs:
             tar -xf Python-\$PYTHON_VERSION.tar.xz
 
             # 1. 编译本机 Python（host版本，用于交叉编译过程）
-            # 使用子shell隔离环境，避免影响后续交叉编译
             (
               cd Python-\$PYTHON_VERSION
               # 清除所有交叉编译环境变量，强制使用本机编译器
@@ -77,6 +77,7 @@ jobs:
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
+          
 
       - name: Download ONNX Runtime source (v1.19.2)
         run: |
