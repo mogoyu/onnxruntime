@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Final Fix - Multiarch Python)
+name: Build onnxruntime for ARMv7l (Final Fix - Manual Headers)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
 env:
   ONNXRUNTIME_VERSION: "1.15.0"
   PYTHON_VERSION: "3.11"
-  # 注意：这里不预先安装 numpy，让构建脚本处理，或者安装 armhf 版本
+  NUMPY_VERSION: "1.23.5" # 选择一个较旧且兼容性好的版本，或者让 build.sh 自己决定
 
 jobs:
   build:
@@ -19,15 +19,28 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python (Host for running build.sh)
+      - name: Set up Python (Host)
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Enable ARMHF Architecture and Install Cross Dependencies
+      - name: Fix Apt Sources for ARMHF and Install Toolchain
         run: |
-          echo "=== Enabling multi-arch ==="
+          echo "=== Fixing apt sources for armhf (ports.ubuntu.com) ==="
+          # 备份原源
+          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+          
+          # 添加 armhf 架构
           sudo dpkg --add-architecture armhf
+          
+          # 替换 security 源为 ports 源 (security.ubuntu.com 没有 armhf)
+          # 注意：Ubuntu 24.04 (Noble) 的 ports 源地址
+          sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list
+          sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list
+          
+          # 如果是 noble，可能需要显式添加 noble-security 到 ports
+          # 实际上 ports.ubuntu.com 包含了所有更新
+          
           sudo apt-get update
           
           echo "=== Installing Cross Toolchain ==="
@@ -43,15 +56,7 @@ jobs:
             libeigen3-dev \
             pkg-config \
             ccache \
-            gfortran
-          
-          echo "=== Installing ARMHF Python Dev Headers (Crucial Fix) ==="
-          # 尝试安装 ARM 架构的 Python 开发包
-          # 注意：Ubuntu 24.04/22.04 的 python3-dev:armhf 版本可能与宿主不一致，需小心
-          # 如果找不到精确匹配的 3.11，可能需要找最近的或者手动处理
-          sudo apt-get install -y \
-            libpython3-dev:armhf \
-            python3-numpy:armhf \
+            gfortran \
             zlib1g-dev:armhf \
             libbz2-dev:armhf \
             liblzma-dev:armhf \
@@ -60,28 +65,103 @@ jobs:
             libsqlite3-dev:armhf \
             libgdbm-dev:armhf \
             libdb5.3-dev:armhf \
-            libmpdec-dev:armhf || echo "Some armhf packages might not be available, proceeding..."
-            
-          # 验证安装
-          ls /usr/include/arm-linux-gnueabihf/python* || echo "No armhf python headers found in standard path"
+            libmpdec-dev:armhf \
+            libexpat1-dev:armhf \
+            uuid-dev:armhf \
+            || echo "Some optional dev packages might be missing, continuing..."
 
-      - name: Install Host Python Build Tools (NOT numpy for cross-compile)
+      - name: Download and Extract ARM Python 3.11 Headers
         run: |
-          # 只安装构建脚本运行所需的工具，不安装 numpy (避免 CMake 混淆)
+          echo "=== Downloading ARM Python 3.11 Headers ==="
+          mkdir -p /home/runner/arm-sysroot/usr/include
+          mkdir -p /home/runner/arm-sysroot/usr/lib
+          
+          # 下载 Python 3.11 的 armhf deb 包 (从 Ubuntu 仓库查找确切版本)
+          # 这里使用一个通用的查找方式，或者直接下载特定版本
+          # 为了稳定性，我们尝试下载 python3.11-minimal 和 python3.11-dev 的 armhf 包
+          # 注意：需要找到确切的版本号。我们可以先 apt-cache madison 或者直接从 launchpad 下载
+          # 简单方法：apt-get download 会自动解析依赖和版本
+          
+          cd /tmp
+          sudo apt-get download python3.11-minimal:armhf python3.11-dev:armhf 2>/dev/null || \
+          sudo apt-get download python3-minimal:armhf python3-dev:armhf 2>/dev/null || \
+          echo "Failed to download exact python3.11 dev packages, trying to find any python3 dev"
+          
+          # 解压 deb 包
+          for deb in *.deb; do
+            if [ -f "$deb" ]; then
+              echo "Extracting $deb"
+              dpkg -x "$deb" /home/runner/arm-sysroot
+            fi
+          done
+          
+          # 验证头文件是否存在
+          if [ -f "/home/runner/arm-sysroot/usr/include/python3.11/Python.h" ]; then
+            echo "✅ Python 3.11 headers found."
+          elif [ -f "/home/runner/arm-sysroot/usr/include/python3.10/Python.h" ]; then
+            echo "⚠️ Found Python 3.10 headers instead. This might cause ABI issues but let's try."
+            # 创建软链接欺骗编译器
+            ln -sf /home/runner/arm-sysroot/usr/include/python3.10 /home/runner/arm-sysroot/usr/include/python3.11
+          else
+            echo "❌ No Python headers found in sysroot!"
+            ls -R /home/runner/arm-sysroot/usr/include
+            exit 1
+          fi
+
+      - name: Download and Extract ARM NumPy Headers
+        run: |
+          echo "=== Downloading ARM NumPy Headers ==="
+          # 下载 numpy 的 wheel (manylinux 或 linux_armv7l)
+          # 我们只需要里面的 headfiles，所以可以下载任意包含 headfiles 的 wheel
+          # 最好下载对应版本的 linux_armv7l wheel，如果没有，就下载源码包或者通用包
+          # 实际上 numpy 的头文件在所有平台 wheel 中是一样的 (在 numpy/core/include)
+          # 但为了确保版本匹配，我们下载一个 wheel 并提取
+          
+          pip download numpy==${{ env.NUMPY_VERSION }} --only-binary=:all: --platform linux_armv7l --python-version 311 --implementation cp --abi cp311 -d /tmp/numpy_wheel || \
+          pip download numpy==${{ env.NUMPY_VERSION }} --no-binary=:all: -d /tmp/numpy_src || \
+          pip download numpy --only-binary=:all: --platform linux_armv7l -d /tmp/numpy_wheel # Fallback to latest
+          
+          cd /tmp
+          if ls numpy_wheel/*.whl 1>/dev/null 2>&1; then
+            unzip -q numpy_wheel/*.whl -d /home/runner/arm-sysroot/usr/lib/python3.11/site-packages
+            # 找到 numpy 头文件路径，通常是 .../numpy/core/include
+            NUMPY_INCLUDE=$(find /home/runner/arm-sysroot -name "arrayobject.h" | head -1 | xargs dirname)
+            echo "NUMPY_INCLUDE=$NUMPY_INCLUDE" >> $GITHUB_ENV
+            echo "✅ NumPy headers extracted to: $NUMPY_INCLUDE"
+          else
+            # 如果没下载到 arm wheel，尝试从源码包或普通包提取 (头文件通常通用)
+            # 解压源码包或 whl
+            for file in numpy_*.tar.gz numpy_*.whl; do
+              if [ -f "$file" ]; then
+                if [[ "$file" == *.whl ]]; then
+                  unzip -q "$file" -d /tmp/numpy_extract
+                else
+                  tar xzf "$file" -C /tmp/numpy_extract
+                fi
+                NUMPY_INCLUDE=$(find /tmp/numpy_extract -name "arrayobject.h" | head -1 | xargs dirname)
+                if [ -n "$NUMPY_INCLUDE" ]; then
+                   mkdir -p /home/runner/arm-sysroot/usr/include/numpy
+                   cp -r "$NUMPY_INCLUDE"/* /home/runner/arm-sysroot/usr/include/numpy/
+                   echo "NUMPY_INCLUDE=/home/runner/arm-sysroot/usr/include/numpy" >> $GITHUB_ENV
+                   echo "✅ NumPy headers extracted from source/wheel."
+                   break
+                fi
+              fi
+            done
+          fi
+
+      - name: Install Host Build Tools
+        run: |
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
-          # 不安装 numpy! 让 build.sh 处理或者使用 armhf 的头文件
+          # 不安装 numpy 到宿主，避免混淆
 
-      - name: Download and Extract ONNX Runtime
+      - name: Download ONNX Runtime
         run: |
-          echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
           wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
-          
-          rm -rf onnxruntime onnxruntime-src
-          mkdir -p onnxruntime-src
-          tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
-          
-          mv onnxruntime-src onnxruntime
+          rm -rf onnxruntime
+          mkdir -p onnxruntime
+          tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
           echo "✅ Source ready"
 
       - name: Create Toolchain File
@@ -96,7 +176,10 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           
-          # 忽略警告
+          # 添加自定义 sysroot 路径
+          list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)
+          
+          # 警告抑制
           set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -fPIC")
           set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -Wno-class-memaccess -fPIC")
           
@@ -108,13 +191,13 @@ jobs:
       - name: Build ONNX Runtime
         run: |
           cd onnxruntime
-          echo "=== Starting Build with ARMHF Python Headers ==="
-          
           rm -rf build/Linux
           
-          # 关键：设置 CMAKE_PREFIX_PATH 或 INCLUDE 路径以优先查找 armhf 头文件
-          export CFLAGS="-I/usr/include/arm-linux-gnueabihf"
-          export CXXFLAGS="-I/usr/include/arm-linux-gnueabihf"
+          export CFLAGS="-I/home/runner/arm-sysroot/usr/include/python3.11 -I${{ env.NUMPY_INCLUDE }}"
+          export CXXFLAGS="-I/home/runner/arm-sysroot/usr/include/python3.11 -I${{ env.NUMPY_INCLUDE }}"
+          
+          echo "Using CFLAGS: $CFLAGS"
+          echo "Using CXXFLAGS: $CXXFLAGS"
           
           bash build.sh \
             --config Release \
@@ -138,9 +221,8 @@ jobs:
               "CMAKE_CXX_FLAGS=-Wno-error -Wno-all -Wno-extra" \
               "CMAKE_C_FLAGS=-Wno-error -Wno-all -Wno-extra"
 
-      - name: Check Build Output
+      - name: Check and Upload
         run: |
-          echo "=== Checking Build Output ==="
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
             echo "✅ Build Successful!"
@@ -148,13 +230,13 @@ jobs:
           else
             echo "❌ Build failed."
             find . -name "*.whl"
-            tail -n 100 build/Linux/Release/CMakeFiles/CMakeError.log 2>/dev/null || true
+            tail -n 50 build/Linux/Release/CMakeFiles/CMakeOutput.log 2>/dev/null || true
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-multiarch
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final
           path: "*.whl"
           retention-days: 14
