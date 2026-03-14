@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (DEB822 Format Fix)
+name: Build onnxruntime for ARMv7l (Verified Package Names)
 
 on:
   workflow_dispatch:
@@ -38,15 +38,45 @@ jobs:
 
       - name: Install Cross Toolchain
         run: |
-          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf build-essential cmake git wget libssl-dev libffi-dev libeigen3-dev pkg-config ccache gfortran zlib1g-dev:armhf libbz2-dev:armhf liblzma-dev:armhf libncursesw5-dev:armhf libreadline-dev:armhf libsqlite3-dev:armhf libgdbm-dev:armhf libdb5.3-dev:armhf libmpdec-dev:armhf libexpat1-dev:armhf uuid-dev:armhf libxcrypt-dev:armhf
+          sudo apt-get install -y \
+            gcc-arm-linux-gnueabihf \
+            g++-arm-linux-gnueabihf \
+            build-essential \
+            cmake \
+            git \
+            wget \
+            libssl-dev \
+            libffi-dev \
+            libeigen3-dev \
+            pkg-config \
+            ccache \
+            gfortran \
+            zlib1g-dev:armhf \
+            libbz2-dev:armhf \
+            liblzma-dev:armhf \
+            libncursesw5-dev:armhf \
+            libreadline-dev:armhf \
+            libsqlite3-dev:armhf \
+            libgdbm-dev:armhf \
+            libdb5.3-dev:armhf \
+            libexpat1-dev:armhf \
+            uuid-dev:armhf || echo "Some packages skipped"
 
       - name: Fetch ARM Python Headers
         run: |
           mkdir -p /home/runner/arm-sysroot/usr/include
           cd /tmp
-          sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf || sudo apt-get download python3-dev:armhf python3-minimal:armhf
-          for deb in *.deb; do dpkg -x "$deb" /home/runner/arm-sysroot; done
+          sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf || sudo apt-get download python3-dev:armhf python3-minimal:armhf || exit 1
+          for deb in *.deb; do
+            if [ -f "$deb" ]; then
+              dpkg -x "$deb" /home/runner/arm-sysroot
+            fi
+          done
           PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h" | head -n 1)
+          if [ -z "$PYTHON_H_PATH" ]; then
+            echo "Error: Python.h not found!"
+            exit 1
+          fi
           PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
           TARGET_INC_DIR="/home/runner/arm-sysroot/usr/include/python3.11"
           mkdir -p "$(dirname "$TARGET_INC_DIR")"
@@ -79,16 +109,18 @@ jobs:
 
       - name: Create Toolchain File
         run: |
-          echo "set(CMAKE_SYSTEM_NAME Linux)" > /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_SYSTEM_PROCESSOR armv7l)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)" >> /home/runner/toolchain-armv7.cmake
-          echo "list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)" >> /home/runner/toolchain-armv7.cmake
-          echo "set(onnxruntime_BUILD_TESTS OFF)" >> /home/runner/toolchain-armv7.cmake
+          cat > /home/runner/toolchain-armv7.cmake << 'EOF'
+          set(CMAKE_SYSTEM_NAME Linux)
+          set(CMAKE_SYSTEM_PROCESSOR armv7l)
+          set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
+          set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+          list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)
+          set(onnxruntime_BUILD_TESTS OFF)
+          EOF
 
       - name: Build ONNX Runtime
         run: |
@@ -96,7 +128,24 @@ jobs:
           rm -rf build/Linux
           echo "PYTHON_INCLUDE_DIR=$PYTHON_INCLUDE_DIR"
           echo "NUMPY_INCLUDE_DIR=$NUMPY_INCLUDE_DIR"
-          bash build.sh --config Release --update --build --build_wheel --skip_tests --enable_pybind --parallel 2 --allow_running_as_root --skip_submodule_sync --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=/home/runner/toolchain-armv7.cmake CMAKE_POLICY_VERSION_MINIMUM=3.5 CMAKE_SYSTEM_PROCESSOR=armv7l onnxruntime_USE_FULL_PROTOBUF=OFF onnxruntime_BUILD_SHARED_LIB=OFF onnxruntime_DISABLE_RTTI=ON onnxruntime_BUILD_TESTS=OFF
+          bash build.sh \
+            --config Release \
+            --update \
+            --build \
+            --build_wheel \
+            --skip_tests \
+            --enable_pybind \
+            --parallel 2 \
+            --allow_running_as_root \
+            --skip_submodule_sync \
+            --cmake_extra_defines \
+              CMAKE_TOOLCHAIN_FILE=/home/runner/toolchain-armv7.cmake \
+              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
+              CMAKE_SYSTEM_PROCESSOR=armv7l \
+              onnxruntime_USE_FULL_PROTOBUF=OFF \
+              onnxruntime_BUILD_SHARED_LIB=OFF \
+              onnxruntime_DISABLE_RTTI=ON \
+              onnxruntime_BUILD_TESTS=OFF
 
       - name: Check and Upload
         run: |
@@ -106,12 +155,13 @@ jobs:
             ls -lh *.whl
           else
             echo "Build failed."
+            find . -name "*.whl"
             exit 1
           fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-deb822"
+          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-verified"
           path: "*.whl"
           retention-days: 14
