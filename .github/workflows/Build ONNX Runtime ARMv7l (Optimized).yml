@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Corrected Final)
+name: Build onnxruntime for ARMv7l (Minimal Fix)
 
 on:
   workflow_dispatch:
@@ -96,6 +96,51 @@ jobs:
           mkdir -p onnxruntime
           tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
 
+      - name: Patch cpuid_info.cc (ONLY FIX - cpuinfo cross-compile issue)
+        run: |
+          cat > /tmp/patch_cpuid.py << 'PYEOF'
+          import re
+          
+          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "r") as f:
+              content = f.read()
+          
+          # 只替换 ArmLinuxInit 函数体为空实现
+          old_func = '''void CPUIDInfo::ArmLinuxInit() {
+          #if defined(__ANDROID__)
+            // Android-specific initialization
+          #else
+            // Linux ARM initialization using cpuinfo library
+            is_hybrid_ = cpuinfo_get_uarchs_count() > 1;
+            has_arm_neon_dot_ = cpuinfo_has_arm_neon_dot();
+            has_fp16_ = cpuinfo_has_arm_neon_fp16_arith();
+            const uint32_t core_cnt = cpuinfo_get_cores_count();
+            for (uint32_t c = 0; c < core_cnt; ++c) {
+              const struct cpuinfo_processor* proc = cpuinfo_get_processor(c);
+              if (!proc) continue;
+              const struct cpuinfo_core* corep = proc->core;
+              if (!corep) continue;
+              auto coreid = proc->linux_id;
+              auto uarch = corep->uarch;
+            }
+          #endif
+          }'''
+          
+          new_func = '''void CPUIDInfo::ArmLinuxInit() {
+            // Cross-compile: skip cpuinfo detection (cpuinfo lib not available)
+            is_hybrid_ = false;
+            has_arm_neon_dot_ = false;
+            has_fp16_ = false;
+          }'''
+          
+          content = content.replace(old_func, new_func)
+          
+          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "w") as f:
+              f.write(content)
+          
+          print("Patched cpuid_info.cc")
+          PYEOF
+          python3 /tmp/patch_cpuid.py
+
       - name: Create Toolchain File
         run: |
           cat > "${{ github.workspace }}/toolchain-armv7.cmake" << 'EOF'
@@ -112,36 +157,20 @@ jobs:
           list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
           set(onnxruntime_BUILD_TESTS OFF)
           set(onnxruntime_BUILD_UNIT_TESTS OFF)
-          set(onnxruntime_ENABLE_CPUINFO OFF)
           EOF
 
       - name: Find Python Library
         run: |
-          echo "Python version: $(python3 --version)"
           PYTHON_LIB_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
           PYTHON_LIB_FILE=$(find "$PYTHON_LIB_DIR" -name "libpython3.11*" 2>/dev/null | head -n 1)
           [ -z "$PYTHON_LIB_FILE" ] && PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3.11*" 2>/dev/null | head -n 1)
-          [ -z "$PYTHON_LIB_FILE" ] && PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3*.a" 2>/dev/null | head -n 1)
           echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
-          echo "Using Python library: $PYTHON_LIB_FILE"
 
-      - name: Build ONNX Runtime (VERBOSE + SINGLE THREAD)
-        id: build
-        continue-on-error: true
+      - name: Build ONNX Runtime
         run: |
           cd onnxruntime
           rm -rf build/Linux
           
-          echo "=== Build Configuration ==="
-          echo "PYTHON_INCLUDE_DIR=${PYTHON_INCLUDE_DIR}"
-          echo "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}"
-          echo "SYSROOT_DIR=${SYSROOT_DIR}"
-          echo "PYTHON_LIBRARY=${PYTHON_LIBRARY}"
-          echo "==========================="
-          
-          # 使用 build.sh 的 --minimal_build 选项来禁用 contrib ops
-          # 使用 --parallel 1 确保日志顺序正确
-          # 使用 CMAKE_VERBOSE_MAKEFILE=ON 获取详细输出
           bash build.sh \
             --config Release \
             --update \
@@ -149,7 +178,7 @@ jobs:
             --build_wheel \
             --skip_tests \
             --enable_pybind \
-            --parallel 1 \
+            --parallel 2 \
             --allow_running_as_root \
             --skip_submodule_sync \
             --cmake_extra_defines \
@@ -172,68 +201,30 @@ jobs:
               onnxruntime_USE_ARMNN=OFF \
               onnxruntime_USE_XNNPACK=OFF \
               onnxruntime_ENABLE_LTO=OFF \
-              onnxruntime_BUILD_WEBASSEMBLY=OFF \
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
               Python3_LIBRARY=${PYTHON_LIBRARY} \
-              CMAKE_VERBOSE_MAKEFILE=ON \
-            2>&1 | tee ../build_full.log
+            2>&1 | tee ../build.log || BUILD_FAILED=1
           
-          echo "build_status=$?" >> $GITHUB_OUTPUT
+          if [ "$BUILD_FAILED" = "1" ]; then
+            echo "=== BUILD FAILED ==="
+            tail -200 ../build.log
+            grep -i "error:" ../build.log | tail -20 || true
+            exit 1
+          fi
 
-      - name: Show Full Error Log (If Build Failed)
-        if: steps.build.outcome == 'failure'
-        run: |
-          echo "=========================================="
-          echo "BUILD FAILED - Full Diagnostic Report"
-          echo "=========================================="
-          
-          echo ""
-          echo "=== Last 500 lines of build log ==="
-          tail -500 build_full.log
-          
-          echo ""
-          echo "=== All error lines (grep) ==="
-          grep -in "error:" build_full.log | head -50 || echo "No 'error:' found"
-          
-          echo ""
-          echo "=== All fatal lines ==="
-          grep -in "fatal" build_full.log | head -20 || echo "No 'fatal' found"
-          
-          echo ""
-          echo "=== CMakeError.log ==="
-          find onnxruntime/build -name "CMakeError.log" -exec cat {} \; 2>/dev/null || echo "No CMakeError.log"
-          
-          echo ""
-          echo "=== CMakeOutput.log (last 200 lines) ==="
-          find onnxruntime/build -name "CMakeOutput.log" -exec tail -200 {} \; 2>/dev/null || echo "No CMakeOutput.log"
-          
-          echo ""
-          echo "=== Makefile:166 context ==="
-          grep -B5 -A5 "Error 2" build_full.log || true
-          
-          echo ""
-          echo "=== contrib_ops build status ==="
-          grep -i "contrib" build_full.log | tail -30 || true
-          
-          exit 1
-
-      - name: Check and Upload (If Build Succeeded)
-        if: steps.build.outcome == 'success'
+      - name: Check and Upload
         run: |
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
             echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "No wheel found. Checking build directory..."
-            find onnxruntime/build -name "*.whl" 2>/dev/null || true
-            ls -la onnxruntime/build/Linux/Release/ || true
+            echo "No wheel found."
             exit 1
           fi
 
       - name: Upload Artifact
-        if: steps.build.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l"
