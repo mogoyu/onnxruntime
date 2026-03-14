@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Cross-Compile Fixed v3)
+name: Build onnxruntime for ARMv7l (Fix Werror)
 
 on:
   workflow_dispatch:
@@ -46,54 +46,23 @@ jobs:
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
           pip install numpy==${{ env.NUMPY_VERSION }}
-          cmake --version
 
       - name: Download and Extract ONNX Runtime
         run: |
           echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
-          wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
+          wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
           
-          echo "=== Clean up any existing directories ==="
           rm -rf onnxruntime onnxruntime-src
-          
-          echo "=== Extracting with --strip-components=1 ==="
           mkdir -p onnxruntime-src
           tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
-          echo "✅ Extract complete"
           
-          echo "=== Verify build.sh exists in onnxruntime-src ==="
-          if [ -f "onnxruntime-src/build.sh" ]; then
-            echo "✅ build.sh found"
-            ls -lh onnxruntime-src/build.sh
-          else
-            echo "❌ build.sh NOT found in onnxruntime-src"
-            echo "=== Contents of onnxruntime-src ==="
-            ls -la onnxruntime-src/
+          if [ ! -f "onnxruntime-src/build.sh" ]; then
+            echo "❌ build.sh not found!"
             exit 1
           fi
           
-          echo "=== Rename onnxruntime-src to onnxruntime ==="
           mv onnxruntime-src onnxruntime
-          if [ $? -ne 0 ]; then
-            echo "❌ mv command failed!"
-            exit 1
-          fi
-          echo "✅ mv complete"
-          
-          echo "=== Final verification ==="
-          if [ -f "onnxruntime/build.sh" ]; then
-            echo "✅ SUCCESS: onnxruntime/build.sh exists"
-            ls -lh onnxruntime/build.sh
-          else
-            echo "❌ FAIL: onnxruntime/build.sh NOT found"
-            echo "=== Current directory ==="
-            pwd
-            echo "=== Contents of current directory ==="
-            ls -la
-            echo "=== Contents of onnxruntime directory ==="
-            ls -la onnxruntime/ 2>/dev/null || echo "onnxruntime directory does not exist"
-            exit 1
-          fi
+          echo "✅ Source ready"
 
       - name: Create Toolchain File
         run: |
@@ -106,18 +75,18 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+          
+          # ✅ 关键修复：添加编译标志以忽略警告错误
+          set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -fPIC")
+          set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -fPIC")
           EOF
-          echo "✅ Toolchain file created"
+          echo "✅ Toolchain file created with -Wno-error"
 
       - name: Build ONNX Runtime (Cross-Compile)
         run: |
-          echo "=== Starting Build ==="
           cd onnxruntime
-          echo "=== Current directory ==="
-          pwd
-          echo "=== Verify build.sh ==="
-          ls -lh build.sh
-          echo "=== Running build.sh ==="
+          echo "=== Starting Build with relaxed warning flags ==="
+          
           bash build.sh \
             --config Release \
             --update \
@@ -134,25 +103,29 @@ jobs:
               CMAKE_SYSTEM_PROCESSOR=armv7l \
               onnxruntime_USE_FULL_PROTOBUF=OFF \
               onnxruntime_BUILD_SHARED_LIB=OFF \
-              onnxruntime_USE_OPENBLAS=OFF
+              onnxruntime_USE_OPENBLAS=OFF \
+              onnxruntime_DISABLE_RTTI=ON \
+              CMAKE_CXX_FLAGS="-Wno-error -Wno-unused-variable -Wno-sign-compare" \
+              CMAKE_C_FLAGS="-Wno-error -Wno-unused-variable"
 
       - name: Check Build Output
         run: |
           echo "=== Checking Build Output ==="
-          find . -name "*.whl" -type f
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
-            echo "=== Wheel Files ==="
+            echo "✅ Build Successful!"
             ls -lh *.whl
           else
-            echo "ERROR: No wheel file found!"
-            find . -name "*.whl" -type f
+            echo "❌ Build failed or no wheel found."
+            find . -name "*.whl"
+            # 显示最后的编译日志片段以便调试
+            tail -n 50 onnxruntime/build/Linux/Release/CMakeFiles/CMakeOutput.log 2>/dev/null || true
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-cross
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-fixed
           path: "*.whl"
           retention-days: 14
