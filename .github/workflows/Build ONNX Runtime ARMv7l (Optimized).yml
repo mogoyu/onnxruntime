@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Fixed Build Errors)
+name: Build onnxruntime for ARMv7l (Final Fixed)
 
 on:
   workflow_dispatch:
@@ -30,19 +30,18 @@ jobs:
         run: |
           pip install --upgrade pip setuptools wheel
 
-      - name: Add ARMHF Architecture and Sources
+      - name: Add ARMHF Architecture (Ignore Errors)
         run: |
-          sudo dpkg --add-architecture armhf
+          sudo dpkg --add-architecture armhf || true
           sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null << 'EOF'
           deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
           deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
           EOF
-          sudo apt-get update || echo "Warning: Some apt sources failed, continuing..."
+          sudo apt-get update || echo "Warning: apt update had errors, continuing..."
 
-      - name: Install Cross Toolchain and Dependencies
+      - name: Install Cross Toolchain
         run: |
-          sudo apt-get install -y \
+          sudo apt-get install -y --ignore-missing \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
             libc6-dev-armhf-cross \
@@ -55,27 +54,19 @@ jobs:
             libffi-dev \
             libeigen3-dev \
             pkg-config \
-            ccache \
-            gfortran \
-            libglib2.0-dev \
-            libglib2.0-dev:armhf || echo "Some packages skipped"
+            || echo "Some packages skipped"
 
-      - name: Install ARMHF Development Libraries
+      - name: Install ARMHF Libraries (Best Effort)
         run: |
-          sudo apt-get install -y \
+          sudo apt-get install -y --ignore-missing \
             zlib1g-dev:armhf \
             libbz2-dev:armhf \
             liblzma-dev:armhf \
-            libncursesw5-dev:armhf \
-            libreadline-dev:armhf \
             libsqlite3-dev:armhf \
-            libgdbm-dev:armhf \
-            libdb5.3-dev:armhf \
             libexpat1-dev:armhf \
-            uuid-dev:armhf \
             libssl-dev:armhf \
             libffi-dev:armhf \
-            libgomp1:armhf || echo "Some optional packages skipped"
+            || echo "Some armhf packages skipped"
 
       - name: Fetch ARM Python Headers
         run: |
@@ -109,7 +100,6 @@ jobs:
           mkdir -p "$DEST_DIR"
           cp -r "$NUMPY_INC"/* "$DEST_DIR/" 2>/dev/null || true
           echo "NUMPY_INCLUDE_DIR=$DEST_DIR" >> "$GITHUB_ENV"
-          echo "Copied numpy headers from $NUMPY_INC to $DEST_DIR"
 
       - name: Install Host Build Tools
         run: |
@@ -134,20 +124,27 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
-          list(APPEND CMAKE_FIND_ROOT_PATH $ENV{SYSROOT_DIR})
           set(onnxruntime_BUILD_TESTS OFF)
           set(onnxruntime_BUILD_UNIT_TESTS OFF)
           EOF
 
-      - name: Find Python Library
+      - name: Find Correct Python Library
         run: |
-          PYTHON_LIB=$(find /usr -name "libpython3.11.so*" -o -name "libpython3.so*" 2>/dev/null | head -n 1)
-          if [ -z "$PYTHON_LIB" ]; then
-            PYTHON_LIB="/usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.so"
+          # 使用当前 Python 环境的库，而不是系统 Python
+          PYTHON_LIB=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
+          PYTHON_LIB_FILE=$(find "$PYTHON_LIB" -name "libpython3.11*" -o -name "libpython3*" 2>/dev/null | head -n 1)
+          if [ -z "$PYTHON_LIB_FILE" ]; then
+            # 尝试 conda/mamba 路径
+            PYTHON_LIB_FILE=$(find /opt/hostedtoolcache -name "libpython3.11.so*" 2>/dev/null | head -n 1)
           fi
-          echo "PYTHON_LIBRARY=$PYTHON_LIB" >> "$GITHUB_ENV"
+          if [ -z "$PYTHON_LIB_FILE" ]; then
+            # 最后尝试找 .a 静态库
+            PYTHON_LIB_FILE=$(find /opt/hostedtoolcache -name "libpython3.11.a" 2>/dev/null | head -n 1)
+          fi
+          echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
+          echo "Using Python library: $PYTHON_LIB_FILE"
 
-      - name: Build ONNX Runtime (No Tests)
+      - name: Build ONNX Runtime (Fixed)
         run: |
           cd onnxruntime
           rm -rf build/Linux
@@ -156,6 +153,8 @@ jobs:
           echo "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}"
           echo "SYSROOT_DIR=${SYSROOT_DIR}"
           echo "PYTHON_LIBRARY=${PYTHON_LIBRARY}"
+          echo "Python executable: $(which python3)"
+          echo "Python version: $(python3 --version)"
           echo "==========================="
           
           bash build.sh \
@@ -164,12 +163,10 @@ jobs:
             --build \
             --build_wheel \
             --skip_tests \
-            --skip_onnx_tests \
             --enable_pybind \
             --parallel 2 \
             --allow_running_as_root \
             --skip_submodule_sync \
-            --cmake_generator "Unix Makefiles" \
             --cmake_extra_defines \
               CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain-armv7.cmake \
               CMAKE_POLICY_VERSION_MINIMUM=3.5 \
@@ -182,8 +179,7 @@ jobs:
               onnxruntime_ENABLE_CPUINFO=OFF \
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
-              Python3_LIBRARY=${PYTHON_LIBRARY} \
-              CMAKE_VERBOSE_MAKEFILE=ON
+              Python3_LIBRARY=${PYTHON_LIBRARY}
 
       - name: Check Build Output
         run: |
@@ -191,7 +187,6 @@ jobs:
           ls -la onnxruntime/build/Linux/Release/ || true
           ls -la onnxruntime/build/Linux/Release/dist/ || true
           find onnxruntime/build -name "*.whl" 2>/dev/null || true
-          find onnxruntime/build -name "*.log" 2>/dev/null | head -5 | xargs -r tail -100 || true
 
       - name: Check and Upload
         run: |
@@ -200,7 +195,7 @@ jobs:
             echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "Build failed. Checking CMake files..."
+            echo "Build failed. Checking logs..."
             cat onnxruntime/build/Linux/Release/CMakeFiles/CMakeOutput.log 2>/dev/null | tail -100 || true
             cat onnxruntime/build/Linux/Release/CMakeFiles/CMakeError.log 2>/dev/null | tail -100 || true
             exit 1
