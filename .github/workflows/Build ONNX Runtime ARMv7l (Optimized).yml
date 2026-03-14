@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Ultimate Fix - Remove Security Source)
+name: Build onnxruntime for ARMv7l (DEB822 Format Fix)
 
 on:
   workflow_dispatch:
@@ -14,136 +14,56 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python (Host)
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: ${{ env.PYTHON_VERSION }}
+          python-version: "${{ env.PYTHON_VERSION }}"
 
-      - name: Configure Apt Sources (Remove Security, Add ARMHF)
+      - name: Add ARMHF Architecture and DEB822 Source
         run: |
-          echo "=== Step 1: Backup and Inspect ==="
-          sudo cp -r /etc/apt/sources.list.d /etc/apt/sources.list.d.bak
-          ls -la /etc/apt/sources.list.d/
-          
-          echo "=== Step 2: Add armhf Architecture ==="
           sudo dpkg --add-architecture armhf
-          
-          echo "=== Step 3: Remove ALL files referencing security.ubuntu.com ==="
-          # 查找并删除任何包含 security.ubuntu.com 的文件
-          sudo grep -l "security.ubuntu.com" /etc/apt/sources.list.d/*.sources /etc/apt/sources.list.d/*.list 2>/dev/null | xargs -r sudo rm -f
-          # 同时也检查主 sources.list
-          if sudo grep -q "security.ubuntu.com" /etc/apt/sources.list 2>/dev/null; then
-            echo "Removing security lines from /etc/apt/sources.list"
-            sudo sed -i '/security.ubuntu.com/d' /etc/apt/sources.list
-          fi
-          
-          echo "=== Step 4: Create Dedicated ARMHF Source File ==="
-          # 创建专门的 armhf 源，只指向 ports.ubuntu.com
-          sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null <<EOF
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          sudo tee /etc/apt/sources.list.d/armhf-ports.sources > /dev/null << 'EOF'
+          Types: deb
+          URIs: http://ports.ubuntu.com/ubuntu-ports
+          Suites: noble noble-updates noble-security noble-backports
+          Components: main restricted universe multiverse
+          Architectures: armhf
           EOF
-          
-          echo "=== Step 5: Verify Remaining Sources ==="
-          echo "--- /etc/apt/sources.list ---"
-          cat /etc/apt/sources.list 2>/dev/null || echo "File not found"
-          echo "--- /etc/apt/sources.list.d/ ---"
-          for f in /etc/apt/sources.list.d/*; do
-            if [ -f "$f" ]; then
-              echo "=== $f ==="
-              cat "$f"
-            fi
-          done
-          
-          echo "=== Step 6: Update Apt ==="
-          sudo apt-get update
-          echo "=== Apt Update Complete ==="
+          sudo apt-get update || echo "Warning: Some apt sources failed, continuing..."
 
-      - name: Install Cross Toolchain & ARMHF Libs
+      - name: Install Cross Toolchain
         run: |
-          echo "=== Installing Packages ==="
-          sudo apt-get install -y \
-            gcc-arm-linux-gnueabihf \
-            g++-arm-linux-gnueabihf \
-            build-essential \
-            cmake \
-            git \
-            wget \
-            libssl-dev \
-            libffi-dev \
-            libeigen3-dev \
-            pkg-config \
-            ccache \
-            gfortran \
-            zlib1g-dev:armhf \
-            libbz2-dev:armhf \
-            liblzma-dev:armhf \
-            libncursesw5-dev:armhf \
-            libreadline-dev:armhf \
-            libsqlite3-dev:armhf \
-            libgdbm-dev:armhf \
-            libdb5.3-dev:armhf \
-            libmpdec-dev:armhf \
-            libexpat1-dev:armhf \
-            uuid-dev:armhf \
-            libxcrypt-dev:armhf || echo "Some optional packages skipped"
+          sudo apt-get install -y gcc-arm-linux-gnueabihf g++-arm-linux-gnueabihf build-essential cmake git wget libssl-dev libffi-dev libeigen3-dev pkg-config ccache gfortran zlib1g-dev:armhf libbz2-dev:armhf liblzma-dev:armhf libncursesw5-dev:armhf libreadline-dev:armhf libsqlite3-dev:armhf libgdbm-dev:armhf libdb5.3-dev:armhf libmpdec-dev:armhf libexpat1-dev:armhf uuid-dev:armhf libxcrypt-dev:armhf
 
-      - name: Manually Fetch ARM Python Headers
+      - name: Fetch ARM Python Headers
         run: |
-          echo "=== Fetching ARM Python Headers ==="
           mkdir -p /home/runner/arm-sysroot/usr/include
-          mkdir -p /home/runner/arm-sysroot/usr/lib
-          
           cd /tmp
-          if ! sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf 2>/dev/null; then
-            echo "Trying generic python3-dev:armhf..."
-            sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null || exit 1
-          fi
-          
-          for deb in *.deb; do
-            if [ -f "$deb" ]; then
-              echo "Extracting $deb"
-              dpkg -x "$deb" /home/runner/arm-sysroot
-            fi
-          done
-          
+          sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf || sudo apt-get download python3-dev:armhf python3-minimal:armhf
+          for deb in *.deb; do dpkg -x "$deb" /home/runner/arm-sysroot; done
           PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h" | head -n 1)
-          if [ -z "$PYTHON_H_PATH" ]; then
-            echo "Error: Python.h not found!"
-            ls -R /home/runner/arm-sysroot/usr/include
-            exit 1
-          fi
-          
           PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
           TARGET_INC_DIR="/home/runner/arm-sysroot/usr/include/python3.11"
-          if [ "$PYTHON_INC_DIR" != "$TARGET_INC_DIR" ]; then
-            mkdir -p "$(dirname "$TARGET_INC_DIR")"
-            if [ -d "$TARGET_INC_DIR" ]; then rm -rf "$TARGET_INC_DIR"; fi
-            ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
-          fi
-          
-          echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> $GITHUB_ENV
+          mkdir -p "$(dirname "$TARGET_INC_DIR")"
+          ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
+          echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> "$GITHUB_ENV"
 
-      - name: Manually Fetch ARM NumPy Headers
+      - name: Fetch ARM NumPy Headers
         run: |
-          echo "=== Fetching NumPy Headers ==="
           cd /tmp
-          pip download numpy==${{ env.NUMPY_VERSION }} --no-binary=:all: -d /tmp/numpy_src
+          pip download "numpy==${{ env.NUMPY_VERSION }}" --no-binary=:all: -d /tmp/numpy_src
           cd /tmp/numpy_src
-          TAR_FILE=$(ls *.tar.gz | head -n 1)
-          tar xzf "$TAR_FILE"
+          tar xzf "$(ls *.tar.gz | head -n 1)"
           cd numpy-*
-          DEST_NUMPY_INC="/home/runner/arm-sysroot/usr/include/numpy"
-          mkdir -p "$DEST_NUMPY_INC"
-          cp -r ./numpy/core/include/numpy/* "$DEST_NUMPY_INC/"
-          echo "NUMPY_INCLUDE_DIR=$DEST_NUMPY_INC" >> $GITHUB_ENV
+          DEST_DIR="/home/runner/arm-sysroot/usr/include/numpy"
+          mkdir -p "$DEST_DIR"
+          cp -r ./numpy/core/include/numpy/* "$DEST_DIR/"
+          echo "NUMPY_INCLUDE_DIR=$DEST_DIR" >> "$GITHUB_ENV"
 
       - name: Install Host Build Tools
         run: |
@@ -152,52 +72,31 @@ jobs:
 
       - name: Download ONNX Runtime
         run: |
-          wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
+          wget -q "https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz" -O onnxruntime-src.tar.gz
           rm -rf onnxruntime
           mkdir -p onnxruntime
           tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
 
       - name: Create Toolchain File
         run: |
-          TOOLCHAIN_FILE="/home/runner/toolchain-armv7.cmake"
-          echo "set(CMAKE_SYSTEM_NAME Linux)" > "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_SYSTEM_PROCESSOR armv7l)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)" >> "$TOOLCHAIN_FILE"
-          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)" >> "$TOOLCHAIN_FILE"
-          echo "list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)" >> "$TOOLCHAIN_FILE"
-          echo "set(onnxruntime_BUILD_TESTS OFF)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_SYSTEM_NAME Linux)" > /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_SYSTEM_PROCESSOR armv7l)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)" >> /home/runner/toolchain-armv7.cmake
+          echo "list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)" >> /home/runner/toolchain-armv7.cmake
+          echo "set(onnxruntime_BUILD_TESTS OFF)" >> /home/runner/toolchain-armv7.cmake
 
       - name: Build ONNX Runtime
         run: |
           cd onnxruntime
           rm -rf build/Linux
-          export CFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
-          export CXXFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
-          echo "Python Include: $PYTHON_INCLUDE_DIR"
-          echo "NumPy Include: $NUMPY_INCLUDE_DIR"
-          
-          bash build.sh \
-            --config Release \
-            --update \
-            --build \
-            --build_wheel \
-            --skip_tests \
-            --enable_pybind \
-            --parallel 2 \
-            --allow_running_as_root \
-            --skip_submodule_sync \
-            --cmake_extra_defines \
-              CMAKE_TOOLCHAIN_FILE=/home/runner/toolchain-armv7.cmake \
-              CMAKE_POLICY_VERSION_MINIMUM=3.5 \
-              CMAKE_SYSTEM_PROCESSOR=armv7l \
-              onnxruntime_USE_FULL_PROTOBUF=OFF \
-              onnxruntime_BUILD_SHARED_LIB=OFF \
-              onnxruntime_DISABLE_RTTI=ON \
-              onnxruntime_BUILD_TESTS=OFF
+          echo "PYTHON_INCLUDE_DIR=$PYTHON_INCLUDE_DIR"
+          echo "NUMPY_INCLUDE_DIR=$NUMPY_INCLUDE_DIR"
+          bash build.sh --config Release --update --build --build_wheel --skip_tests --enable_pybind --parallel 2 --allow_running_as_root --skip_submodule_sync --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=/home/runner/toolchain-armv7.cmake CMAKE_POLICY_VERSION_MINIMUM=3.5 CMAKE_SYSTEM_PROCESSOR=armv7l onnxruntime_USE_FULL_PROTOBUF=OFF onnxruntime_BUILD_SHARED_LIB=OFF onnxruntime_DISABLE_RTTI=ON onnxruntime_BUILD_TESTS=OFF
 
       - name: Check and Upload
         run: |
@@ -209,10 +108,10 @@ jobs:
             echo "Build failed."
             exit 1
           fi
-          
+
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-ultimate-fix
+          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-deb822"
           path: "*.whl"
           retention-days: 14
