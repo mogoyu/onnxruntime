@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Final Syntax Fix)
+name: Build onnxruntime for ARMv7l (Hybrid Sources Fix)
 
 on:
   workflow_dispatch:
@@ -24,26 +24,29 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Prepare Clean Apt Sources for ARMHF
+      - name: Configure Hybrid Apt Sources (AMD64 + ARMHF)
         run: |
-          echo "=== Nuking existing apt sources ==="
-          sudo cp -r /etc/apt /etc/apt.bak
+          echo "=== Configuring Hybrid Apt Sources ==="
+          
+          # 1. 添加 armhf 架构支持
           sudo dpkg --add-architecture armhf
           
-          echo "deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list
-          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
-          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          # 2. 创建专门的 armhf 源列表文件
+          # 这样 amd64 请求走默认源，armhf 请求走 ports 源
+          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list.d/armhf.list
+          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
+          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list.d/armhf.list
           
-          sudo rm -rf /etc/apt/sources.list.d/*
-          
+          # 3. 更新 apt
+          # 此时 amd64 包会从 archive.ubuntu.com 获取，armhf 包从 ports.ubuntu.com 获取
           echo "=== Updating apt ==="
           sudo apt-get update
-          echo "=== Apt update finished ==="
+          echo "=== Apt update finished successfully ==="
 
-      - name: Install Cross Toolchain
+      - name: Install Cross Toolchain & ARMHF Libs
         run: |
-          echo "=== Installing Cross Toolchain ==="
+          echo "=== Installing Cross Toolchain and ARMHF Libraries ==="
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
@@ -77,8 +80,9 @@ jobs:
           mkdir -p /home/runner/arm-sysroot/usr/lib
           
           cd /tmp
+          # 下载 armhf 版本的 python dev 包
           if ! sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf 2>/dev/null; then
-            echo "Trying generic python3-dev..."
+            echo "Trying generic python3-dev:armhf..."
             sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null || exit 1
           fi
           
@@ -107,7 +111,6 @@ jobs:
             ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
           fi
           
-          # 写入 GITHUB_ENV
           echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> $GITHUB_ENV
           echo "Python headers ready."
 
@@ -128,7 +131,6 @@ jobs:
           mkdir -p "$DEST_NUMPY_INC"
           cp -r "$SRC_NUMPY_INC"/* "$DEST_NUMPY_INC/"
           
-          # 写入 GITHUB_ENV
           echo "NUMPY_INCLUDE_DIR=$DEST_NUMPY_INC" >> $GITHUB_ENV
           echo "NumPy headers ready."
 
@@ -168,14 +170,11 @@ jobs:
           cd onnxruntime
           rm -rf build/Linux
           
-          # 【关键修复】直接使用 $VAR_NAME，不要使用 ${{ env.VAR_NAME }}
-          # GitHub Actions 会自动将上一步写入 $GITHUB_ENV 的变量注入到当前 shell 环境
           export CFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
           export CXXFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
           
           echo "Building with Python Include: $PYTHON_INCLUDE_DIR"
           echo "Building with NumPy Include: $NUMPY_INCLUDE_DIR"
-          echo "CFLAGS: $CFLAGS"
           
           bash build.sh \
             --config Release \
@@ -215,6 +214,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final-fixed
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-hybrid-fix
           path: "*.whl"
           retention-days: 14
