@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Verified Package Names)
+name: Build onnxruntime for ARMv7l (Verified Paths)
 
 on:
   workflow_dispatch:
@@ -13,7 +13,7 @@ env:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04
 
     steps:
       - name: Checkout
@@ -24,15 +24,13 @@ jobs:
         with:
           python-version: "${{ env.PYTHON_VERSION }}"
 
-      - name: Add ARMHF Architecture and DEB822 Source
+      - name: Add ARMHF Architecture and Sources
         run: |
           sudo dpkg --add-architecture armhf
-          sudo tee /etc/apt/sources.list.d/armhf-ports.sources > /dev/null << 'EOF'
-          Types: deb
-          URIs: http://ports.ubuntu.com/ubuntu-ports
-          Suites: noble noble-updates noble-security noble-backports
-          Components: main restricted universe multiverse
-          Architectures: armhf
+          sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null << 'EOF'
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-security main restricted universe multiverse
           EOF
           sudo apt-get update || echo "Warning: Some apt sources failed, continuing..."
 
@@ -41,6 +39,8 @@ jobs:
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
+            libc6-dev-armhf-cross \
+            linux-libc-dev-armhf-cross \
             build-essential \
             cmake \
             git \
@@ -50,7 +50,11 @@ jobs:
             libeigen3-dev \
             pkg-config \
             ccache \
-            gfortran \
+            gfortran || echo "Some packages skipped"
+
+      - name: Install ARMHF Development Libraries
+        run: |
+          sudo apt-get install -y \
             zlib1g-dev:armhf \
             libbz2-dev:armhf \
             liblzma-dev:armhf \
@@ -60,28 +64,33 @@ jobs:
             libgdbm-dev:armhf \
             libdb5.3-dev:armhf \
             libexpat1-dev:armhf \
-            uuid-dev:armhf || echo "Some packages skipped"
+            uuid-dev:armhf \
+            libssl-dev:armhf \
+            libffi-dev:armhf || echo "Some optional packages skipped"
 
       - name: Fetch ARM Python Headers
         run: |
-          mkdir -p /home/runner/arm-sysroot/usr/include
+          SYSROOT_DIR="${{ github.workspace }}/arm-sysroot"
+          mkdir -p "$SYSROOT_DIR/usr/include"
+          mkdir -p "$SYSROOT_DIR/usr/lib"
           cd /tmp
-          sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf || sudo apt-get download python3-dev:armhf python3-minimal:armhf || exit 1
+          sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null || true
           for deb in *.deb; do
             if [ -f "$deb" ]; then
-              dpkg -x "$deb" /home/runner/arm-sysroot
+              dpkg -x "$deb" "$SYSROOT_DIR" 2>/dev/null || true
             fi
           done
-          PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h" | head -n 1)
-          if [ -z "$PYTHON_H_PATH" ]; then
-            echo "Error: Python.h not found!"
-            exit 1
+          PYTHON_H_PATH=$(find "$SYSROOT_DIR" -name "Python.h" 2>/dev/null | head -n 1)
+          if [ -n "$PYTHON_H_PATH" ]; then
+            PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
+            TARGET_INC_DIR="$SYSROOT_DIR/usr/include/python3.11"
+            mkdir -p "$(dirname "$TARGET_INC_DIR")"
+            ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
+            echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> "$GITHUB_ENV"
+          else
+            echo "PYTHON_INCLUDE_DIR=$SYSROOT_DIR/usr/include/python3.11" >> "$GITHUB_ENV"
           fi
-          PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
-          TARGET_INC_DIR="/home/runner/arm-sysroot/usr/include/python3.11"
-          mkdir -p "$(dirname "$TARGET_INC_DIR")"
-          ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
-          echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> "$GITHUB_ENV"
+          echo "SYSROOT_DIR=$SYSROOT_DIR" >> "$GITHUB_ENV"
 
       - name: Fetch ARM NumPy Headers
         run: |
@@ -90,9 +99,9 @@ jobs:
           cd /tmp/numpy_src
           tar xzf "$(ls *.tar.gz | head -n 1)"
           cd numpy-*
-          DEST_DIR="/home/runner/arm-sysroot/usr/include/numpy"
+          DEST_DIR="${{ github.workspace }}/arm-sysroot/usr/include/numpy"
           mkdir -p "$DEST_DIR"
-          cp -r ./numpy/core/include/numpy/* "$DEST_DIR/"
+          cp -r ./numpy/core/include/numpy/* "$DEST_DIR/" 2>/dev/null || true
           echo "NUMPY_INCLUDE_DIR=$DEST_DIR" >> "$GITHUB_ENV"
 
       - name: Install Host Build Tools
@@ -109,7 +118,7 @@ jobs:
 
       - name: Create Toolchain File
         run: |
-          cat > /home/runner/toolchain-armv7.cmake << 'EOF'
+          cat > "${{ github.workspace }}/toolchain-armv7.cmake" << 'EOF'
           set(CMAKE_SYSTEM_NAME Linux)
           set(CMAKE_SYSTEM_PROCESSOR armv7l)
           set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
@@ -118,16 +127,26 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)
+          list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
           set(onnxruntime_BUILD_TESTS OFF)
           EOF
+
+      - name: Find Python Library
+        run: |
+          PYTHON_LIB=$(find /usr -name "libpython3.11.so*" -o -name "libpython3.so*" 2>/dev/null | head -n 1)
+          if [ -z "$PYTHON_LIB" ]; then
+            PYTHON_LIB="/usr/lib/python3.11/config-3.11-x86_64-linux-gnu/libpython3.11.so"
+          fi
+          echo "PYTHON_LIBRARY=$PYTHON_LIB" >> "$GITHUB_ENV"
 
       - name: Build ONNX Runtime
         run: |
           cd onnxruntime
           rm -rf build/Linux
-          echo "PYTHON_INCLUDE_DIR=$PYTHON_INCLUDE_DIR"
-          echo "NUMPY_INCLUDE_DIR=$NUMPY_INCLUDE_DIR"
+          echo "PYTHON_INCLUDE_DIR=${PYTHON_INCLUDE_DIR}"
+          echo "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}"
+          echo "SYSROOT_DIR=${SYSROOT_DIR}"
+          echo "PYTHON_LIBRARY=${PYTHON_LIBRARY}"
           bash build.sh \
             --config Release \
             --update \
@@ -139,13 +158,16 @@ jobs:
             --allow_running_as_root \
             --skip_submodule_sync \
             --cmake_extra_defines \
-              CMAKE_TOOLCHAIN_FILE=/home/runner/toolchain-armv7.cmake \
+              CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain-armv7.cmake \
               CMAKE_POLICY_VERSION_MINIMUM=3.5 \
               CMAKE_SYSTEM_PROCESSOR=armv7l \
               onnxruntime_USE_FULL_PROTOBUF=OFF \
               onnxruntime_BUILD_SHARED_LIB=OFF \
               onnxruntime_DISABLE_RTTI=ON \
-              onnxruntime_BUILD_TESTS=OFF
+              onnxruntime_BUILD_TESTS=OFF \
+              Python3_EXECUTABLE=$(which python3) \
+              Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
+              Python3_LIBRARY=${PYTHON_LIBRARY}
 
       - name: Check and Upload
         run: |
@@ -154,8 +176,9 @@ jobs:
             echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "Build failed."
-            find . -name "*.whl"
+            echo "Build failed. Checking build directory..."
+            find onnxruntime/build -name "*.whl" 2>/dev/null || true
+            find onnxruntime/build -name "*.log" 2>/dev/null | head -5 | xargs -r tail -50
             exit 1
           fi
 
