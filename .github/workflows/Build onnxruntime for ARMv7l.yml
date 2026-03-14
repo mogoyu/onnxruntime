@@ -34,12 +34,12 @@ jobs:
           "
 
       - name: Download ONNX Runtime source (v1.19.2)
-      run: |
-        ./dockcross bash -c "
-          set -e
-          wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz
-          tar xzf v1.19.2.tar.gz
-        "
+        run: |                       # 注意：run 必须相对于 name 缩进两个空格
+          ./dockcross bash -c "
+            set -e
+            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz
+            tar xzf v1.19.2.tar.gz
+          "
 
       - name: Cross-compile ONNX Runtime and build wheel
         id: build
@@ -51,7 +51,7 @@ jobs:
             # 设置交叉编译必需的环境变量
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
-            # 使用 dockcross 内置的工具链文件 (关键修正)
+            # 使用 dockcross 内置的工具链文件
             TOOLCHAIN_FILE=/usr/share/cmake/toolchain.cmake
 
             echo 'Using toolchain: $TOOLCHAIN_FILE'
