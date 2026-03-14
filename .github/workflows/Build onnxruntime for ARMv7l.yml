@@ -1,7 +1,7 @@
 name: Cross-compile ONNX Runtime for armv7 (Python 3.11)
 
 on:
-  workflow_dispatch:  # 手动触发
+  workflow_dispatch:
   push:
     branches: [ main ]
 
@@ -29,20 +29,32 @@ jobs:
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
               cmake make
 
-            # 下载并交叉编译 Python 3.11.9
+            # 下载 Python 源码
             PYTHON_VERSION=3.11.9
             wget -q https://www.python.org/ftp/python/\$PYTHON_VERSION/Python-\$PYTHON_VERSION.tar.xz
             tar -xf Python-\$PYTHON_VERSION.tar.xz
+
+            # 1. 编译本机 Python（host版本，用于交叉编译过程）
+            cd Python-\$PYTHON_VERSION
+            ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu
+            make -j\$(nproc)
+            make install
+            cd ..
+
+            # 2. 交叉编译目标 Python（armv7版本）
+            # 清除之前的源码目录，重新解压以确保干净
+            rm -rf Python-\$PYTHON_VERSION
+            tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
 
-            # 交叉编译配置
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
-            export HOSTCC=gcc          # 使用系统默认 gcc（版本 12）
-            export HOSTCXX=g++         # 使用系统默认 g++
+            export HOSTCC=gcc
+            export HOSTCXX=g++
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
               --prefix=/usr/local \
+              --with-build-python=/opt/host-python/bin/python3.11 \
               --enable-optimizations \
               ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=yes
 
@@ -57,7 +69,6 @@ jobs:
 
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
-          "
           "
 
       - name: Download ONNX Runtime source (v1.19.2)
