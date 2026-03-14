@@ -109,25 +109,25 @@ jobs:
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
 
-            # 获取工具链文件路径，如果环境变量未设置，则使用默认路径
-            TOOLCHAIN_FILE=\${DEFAULT_DOCKCROSS_CMAKE_TOOLCHAIN:-/usr/share/cmake/toolchain.cmake}
-            echo 'Using toolchain: \$TOOLCHAIN_FILE'
-            if [ -f \"\$TOOLCHAIN_FILE\" ]; then
-              cat \$TOOLCHAIN_FILE
-            else
-              echo \"Error: Toolchain file not found at \$TOOLCHAIN_FILE\"
-              exit 1
-            fi
+            # 使用 ONNX Runtime 官方提供的 ARM Linux 工具链文件
+            ONNX_ARM_TOOLCHAIN=\$(pwd)/tools/cmake/platforms/LinuxARM.cmake
+            echo 'Using ONNX ARM toolchain: \$ONNX_ARM_TOOLCHAIN'
+            
+            # 同时使用 dockcross 的环境变量设置
+            # 注意：ONNX Runtime 的 LinuxARM.cmake 会自动使用交叉编译器
 
             python3.11 tools/ci_build/build.py \
               --build_dir build \
               --config Release \
               --arm \
-              --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=\$TOOLCHAIN_FILE onnxruntime_USE_OPENMP=ON \
+              --cmake_extra_defines \
+                CMAKE_TOOLCHAIN_FILE=\$ONNX_ARM_TOOLCHAIN \
+                onnxruntime_USE_OPENMP=ON \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
               --parallel
+          "
           "
 
       - name: Copy wheel to host
