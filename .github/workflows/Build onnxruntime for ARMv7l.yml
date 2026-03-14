@@ -104,22 +104,26 @@ jobs:
             set -e
             cd onnxruntime-1.19.2
 
-            # 确保本机 Python 在 PATH 中优先（避免错误执行 ARM 可执行文件）
+            # 确保本机 Python 在 PATH 中优先
             export PATH=/opt/host-python/bin:\$PATH
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
-            # 使用 dockcross 提供的工具链文件环境变量
-            TOOLCHAIN_FILE=\${DEFAULT_DOCKCROSS_CMAKE_TOOLCHAIN}
 
+            # 获取工具链文件路径，如果环境变量未设置，则使用默认路径
+            TOOLCHAIN_FILE=\${DEFAULT_DOCKCROSS_CMAKE_TOOLCHAIN:-/usr/share/cmake/toolchain.cmake}
             echo 'Using toolchain: \$TOOLCHAIN_FILE'
-            cat \$TOOLCHAIN_FILE
+            if [ -f \"\$TOOLCHAIN_FILE\" ]; then
+              cat \$TOOLCHAIN_FILE
+            else
+              echo \"Error: Toolchain file not found at \$TOOLCHAIN_FILE\"
+              exit 1
+            fi
 
             python3.11 tools/ci_build/build.py \
               --build_dir build \
               --config Release \
               --arm \
-              --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=\$TOOLCHAIN_FILE \
-              --use_openmp \
+              --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=\$TOOLCHAIN_FILE onnxruntime_USE_OPENMP=ON \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
