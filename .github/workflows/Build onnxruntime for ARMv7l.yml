@@ -1,7 +1,7 @@
 name: Cross-compile ONNX Runtime for armv7 (Python 3.11)
 
 on:
-  workflow_dispatch:
+  workflow_dispatch:  # 手动触发
   push:
     branches: [ main ]
 
@@ -23,12 +23,10 @@ jobs:
         run: |
           ./dockcross bash -c "
             set -e
-            # 安装编译 Python 和 ONNX Runtime 所需的依赖，包括 expat
             apt-get update && apt-get install -y --no-install-recommends \
               wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
-              cmake make \
-              libexpat1-dev
+              cmake make libexpat1-dev unzip
 
             # 下载 Python 源码
             PYTHON_VERSION=3.11.9
@@ -38,7 +36,6 @@ jobs:
             # 1. 编译本机 Python（host版本，用于交叉编译过程）
             (
               cd Python-\$PYTHON_VERSION
-              # 清除所有交叉编译环境变量，强制使用本机编译器
               unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
               export CC=/usr/bin/gcc
               export CXX=/usr/bin/g++
@@ -48,7 +45,6 @@ jobs:
             )
 
             # 2. 交叉编译目标 Python（armv7版本）
-            # 重新解压源码以确保干净
             rm -rf Python-\$PYTHON_VERSION
             tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
@@ -56,7 +52,6 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
-            # dockcross 已自动设置正确的交叉编译器环境变量（CC、CXX等），无需手动干预
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -69,23 +64,15 @@ jobs:
               ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=yes
 
             make -j\$(nproc)
-
-            # 安装前确保 PATH 优先使用本机 Python
             export PATH=/opt/host-python/bin:\$PATH
             make install
             cd ..
 
-            # 手动安装 pip 和 setuptools 到目标 Python（使用本机 Python 运行 ensurepip）
-            echo "Manually installing pip and setuptools for target Python..."
-            export PATH=/opt/host-python/bin:\$PATH
+            # 手动安装 pip 和 setuptools
             /opt/host-python/bin/python3.11 -m ensurepip --upgrade --root=/
-            # 验证目标 Python 能否通过 QEMU 运行
-            echo "Target Python version:"
             /usr/local/bin/python3.11 --version
 
             rm -rf Python-\$PYTHON_VERSION*
-
-            # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
 
@@ -96,20 +83,27 @@ jobs:
             wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz
             tar xzf v1.19.2.tar.gz
           "
+
       - name: Cross-compile ONNX Runtime and build wheel
-        id: build
         run: |
           ./dockcross bash -c "
             set -e
             cd onnxruntime-1.19.2
 
-            # 确保本机 Python 在 PATH 中优先
             export PATH=/opt/host-python/bin:\$PATH
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
 
-            # 不再手动指定工具链文件，完全依赖 dockcross 的环境
-            # 将 dockcross 设置的所有编译器变量传递给 CMake
+            # 手动下载 Eigen（避免网络校验失败）
+            EIGEN_COMMIT=\"e7248b26a1ed53fa030c5c459f7ea095dfd276ac\"
+            EIGEN_DIR=\"/opt/eigen-src\"
+            mkdir -p \$EIGEN_DIR
+            wget -q https://gitlab.com/libeigen/eigen/-/archive/\$EIGEN_COMMIT/eigen-\$EIGEN_COMMIT.zip -O /tmp/eigen.zip
+            unzip -q /tmp/eigen.zip -d /opt
+            mv /opt/eigen-\$EIGEN_COMMIT/* \$EIGEN_DIR/
+            rmdir /opt/eigen-\$EIGEN_COMMIT
+            rm /tmp/eigen.zip
+
             python3.11 tools/ci_build/build.py \
               --build_dir build \
               --config Release \
@@ -119,13 +113,13 @@ jobs:
                 CMAKE_CXX_COMPILER=\${CXX} \
                 CMAKE_MAKE_PROGRAM=/usr/bin/make \
                 onnxruntime_USE_OPENMP=ON \
+                FETCHCONTENT_SOURCE_DIR_EIGEN=\$EIGEN_DIR \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
               --parallel \
               --allow_running_as_root
           "
-
 
       - name: Copy wheel to host
         run: |
