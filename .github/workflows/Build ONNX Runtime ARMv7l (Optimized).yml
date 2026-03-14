@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Final Verified)
+name: Build onnxruntime for ARMv7l (With Full Error Capture)
 
 on:
   workflow_dispatch:
@@ -30,18 +30,18 @@ jobs:
         run: |
           pip install --upgrade pip setuptools wheel
 
-      - name: Add ARMHF Architecture (Ignore Errors)
+      - name: Add ARMHF Architecture
         run: |
           sudo dpkg --add-architecture armhf || true
           sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null << 'EOF'
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-          EOF
-          sudo apt-get update || echo "Warning: apt update had errors, continuing..."
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
+deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
+EOF
+          sudo apt-get update || true
 
       - name: Install Cross Toolchain
         run: |
-          sudo apt-get install -y --ignore-missing \
+          sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
             libc6-dev-armhf-cross \
@@ -53,20 +53,16 @@ jobs:
             libssl-dev \
             libffi-dev \
             libeigen3-dev \
-            pkg-config \
-            || echo "Some packages skipped"
+            pkg-config
 
       - name: Fetch ARM Python Headers
         run: |
           SYSROOT_DIR="${{ github.workspace }}/arm-sysroot"
           mkdir -p "$SYSROOT_DIR/usr/include"
-          mkdir -p "$SYSROOT_DIR/usr/lib"
           cd /tmp
-          sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null || true
-          for deb in *.deb; do
-            if [ -f "$deb" ]; then
-              dpkg -x "$deb" "$SYSROOT_DIR" 2>/dev/null || true
-            fi
+          sudo apt-get download python3-dev:armhf 2>/dev/null || true
+          for deb in python3*.deb; do
+            [ -f "$deb" ] && dpkg -x "$deb" "$SYSROOT_DIR" 2>/dev/null || true
           done
           PYTHON_H_PATH=$(find "$SYSROOT_DIR" -name "Python.h" 2>/dev/null | head -n 1)
           if [ -n "$PYTHON_H_PATH" ]; then
@@ -103,52 +99,41 @@ jobs:
       - name: Create Toolchain File
         run: |
           cat > "${{ github.workspace }}/toolchain-armv7.cmake" << 'EOF'
-          set(CMAKE_SYSTEM_NAME Linux)
-          set(CMAKE_SYSTEM_PROCESSOR armv7l)
-          set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
-          set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
-          set(CMAKE_C_FLAGS "-march=armv7-a -mfpu=neon -mfloat-abi=hard")
-          set(CMAKE_CXX_FLAGS "-march=armv7-a -mfpu=neon -mfloat-abi=hard")
-          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
-          set(onnxruntime_BUILD_TESTS OFF)
-          set(onnxruntime_BUILD_UNIT_TESTS OFF)
-          EOF
+set(CMAKE_SYSTEM_NAME Linux)
+set(CMAKE_SYSTEM_PROCESSOR armv7l)
+set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
+set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
+set(CMAKE_C_FLAGS "-march=armv7-a -mfpu=neon -mfloat-abi=hard")
+set(CMAKE_CXX_FLAGS "-march=armv7-a -mfpu=neon -mfloat-abi=hard")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
+list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
+set(onnxruntime_BUILD_TESTS OFF)
+set(onnxruntime_BUILD_UNIT_TESTS OFF)
+EOF
 
-      - name: Find Correct Python Library
+      - name: Find Python Library
         run: |
           echo "Python version: $(python3 --version)"
-          echo "Python executable: $(which python3)"
-          
           PYTHON_LIB_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
-          echo "Python LIBDIR: $PYTHON_LIB_DIR"
-          
           PYTHON_LIB_FILE=$(find "$PYTHON_LIB_DIR" -name "libpython3.11*" 2>/dev/null | head -n 1)
-          if [ -z "$PYTHON_LIB_FILE" ]; then
-            PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3.11*" 2>/dev/null | head -n 1)
-          fi
-          if [ -z "$PYTHON_LIB_FILE" ]; then
-            PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3*.a" 2>/dev/null | head -n 1)
-          fi
-          
+          [ -z "$PYTHON_LIB_FILE" ] && PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3.11*" 2>/dev/null | head -n 1)
+          [ -z "$PYTHON_LIB_FILE" ] && PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3*.a" 2>/dev/null | head -n 1)
           echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
           echo "Using Python library: $PYTHON_LIB_FILE"
 
-      - name: Build ONNX Runtime (XNNPACK DISABLED)
+      - name: Build ONNX Runtime (Single Thread for Debug)
         run: |
           cd onnxruntime
           rm -rf build/Linux
           
           echo "=== Build Configuration ==="
-          echo "PYTHON_INCLUDE_DIR=${PYTHON_INCLUDE_DIR}"
-          echo "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}"
-          echo "SYSROOT_DIR=${SYSROOT_DIR}"
-          echo "PYTHON_LIBRARY=${PYTHON_LIBRARY}"
+          env | grep -E "PYTHON|NUMPY|SYSROOT" || true
           echo "==========================="
           
+          # 使用单线程构建以便捕获完整错误
           bash build.sh \
             --config Release \
             --update \
@@ -156,7 +141,7 @@ jobs:
             --build_wheel \
             --skip_tests \
             --enable_pybind \
-            --parallel 2 \
+            --parallel 1 \
             --allow_running_as_root \
             --skip_submodule_sync \
             --cmake_extra_defines \
@@ -179,17 +164,25 @@ jobs:
               onnxruntime_USE_ARMNN=OFF \
               onnxruntime_USE_XNNPACK=OFF \
               onnxruntime_ENABLE_LTO=OFF \
+              onnxruntime_BUILD_WEBASSEMBLY=OFF \
+              onnxruntime_BUILD_WEBASSEMBLY_BENCHMARKS=OFF \
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
               Python3_LIBRARY=${PYTHON_LIBRARY} \
-              CMAKE_VERBOSE_MAKEFILE=ON \
-            2>&1 | tee ../build_output.log || BUILD_FAILED=1
+            2>&1 | tee ../build_full.log
           
-          if [ "$BUILD_FAILED" = "1" ]; then
-            echo "=== Build Failed! ==="
-            tail -200 ../build_output.log
-            echo "=== Real errors ==="
-            grep -iE "error:|fatal error" ../build_output.log | head -50 || true
+          BUILD_STATUS=$?
+          
+          if [ $BUILD_STATUS -ne 0 ]; then
+            echo "=== BUILD FAILED ==="
+            echo "=== Last 300 lines of build log ==="
+            tail -300 ../build_full.log
+            echo "=== Searching for errors ==="
+            grep -in "error:" ../build_full.log | tail -30 || true
+            echo "=== CMakeError.log ==="
+            find build -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
+            echo "=== CMakeOutput.log (last 100 lines) ==="
+            find build -name "CMakeOutput.log" -exec tail -100 {} \; 2>/dev/null || true
             exit 1
           fi
 
@@ -200,14 +193,15 @@ jobs:
             echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "Build failed. Checking logs..."
-            find onnxruntime/build -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
+            echo "No wheel found. Checking build directory..."
+            find onnxruntime/build -name "*.whl" 2>/dev/null || true
+            ls -la onnxruntime/build/Linux/Release/ || true
             exit 1
           fi
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final"
+          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l"
           path: "*.whl"
           retention-days: 14
