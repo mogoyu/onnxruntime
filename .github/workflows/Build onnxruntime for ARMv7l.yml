@@ -23,12 +23,11 @@ jobs:
         run: |
           ./dockcross bash -c "
             set -e
-            # 安装编译 Python 和 ONNX Runtime 所需的依赖，包括本地编译器（用于构建 Python 的 bootstrap）
+            # 安装编译 Python 和 ONNX Runtime 所需的依赖
             apt-get update && apt-get install -y --no-install-recommends \
               wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
-              cmake make \
-              gcc-10 g++-10   # 确保本地编译器可用（HOSTCC）
+              cmake make
 
             # 下载并交叉编译 Python 3.11.9
             PYTHON_VERSION=3.11.9
@@ -38,8 +37,8 @@ jobs:
 
             # 交叉编译配置
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
-            export HOSTCC=gcc-10
-            export HOSTCXX=g++-10
+            export HOSTCC=gcc          # 使用系统默认 gcc（版本 12）
+            export HOSTCXX=g++         # 使用系统默认 g++
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -52,12 +51,13 @@ jobs:
             cd ..
             rm -rf Python-\$PYTHON_VERSION*
 
-            # 安装 pip 和构建工具（此时 python3.11 为 armv7 可执行文件，通过 QEMU 运行）
+            # 安装 pip 和构建工具
             python3.11 -m ensurepip --upgrade
             python3.11 -m pip install --upgrade pip setuptools wheel
 
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
+          "
           "
 
       - name: Download ONNX Runtime source (v1.19.2)
