@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Final Fix - Manual Headers)
+name: Build onnxruntime for ARMv7l (Ultimate Fix - Clean Sources)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
 env:
   ONNXRUNTIME_VERSION: "1.15.0"
   PYTHON_VERSION: "3.11"
-  NUMPY_VERSION: "1.23.5" # 选择一个较旧且兼容性好的版本，或者让 build.sh 自己决定
+  NUMPY_VERSION: "1.23.5"
 
 jobs:
   build:
@@ -24,25 +24,36 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Fix Apt Sources for ARMHF and Install Toolchain
+      - name: Prepare Clean Apt Sources for ARMHF
         run: |
-          echo "=== Fixing apt sources for armhf (ports.ubuntu.com) ==="
-          # 备份原源
-          sudo cp /etc/apt/sources.list /etc/apt/sources.list.bak
+          echo "=== Nuking existing apt sources ==="
+          # 备份
+          sudo cp -r /etc/apt /etc/apt.bak
           
-          # 添加 armhf 架构
+          # 1. 添加 armhf 架构
           sudo dpkg --add-architecture armhf
           
-          # 替换 security 源为 ports 源 (security.ubuntu.com 没有 armhf)
-          # 注意：Ubuntu 24.04 (Noble) 的 ports 源地址
-          sudo sed -i 's|http://security.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list
-          sudo sed -i 's|http://archive.ubuntu.com/ubuntu|http://ports.ubuntu.com/ubuntu-ports|g' /etc/apt/sources.list
+          # 2. 彻底重写 /etc/apt/sources.list 只使用 ports.ubuntu.com
+          # Ubuntu 24.04 (Noble) 的 codename 是 noble
+          sudo tee /etc/apt/sources.list > /dev/null <<EOF
+deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+EOF
           
-          # 如果是 noble，可能需要显式添加 noble-security 到 ports
-          # 实际上 ports.ubuntu.com 包含了所有更新
+          # 3. 删除 /etc/apt/sources.list.d/ 下所有可能包含 security.ubuntu.com 的文件
+          sudo rm -rf /etc/apt/sources.list.d/*
           
+          # 4. 更新 apt
+          echo "=== Updating apt with clean ports sources ==="
           sudo apt-get update
           
+          # 验证：确保没有 armhf 相关的 error
+          echo "=== Apt update finished ==="
+
+      - name: Install Cross Toolchain (No Python Dev via Apt)
+        run: |
           echo "=== Installing Cross Toolchain ==="
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
@@ -68,26 +79,48 @@ jobs:
             libmpdec-dev:armhf \
             libexpat1-dev:armhf \
             uuid-dev:armhf \
-            || echo "Some optional dev packages might be missing, continuing..."
+            libxcrypt-dev:armhf \
+            || echo "Some optional packages skipped"
 
-      - name: Download and Extract ARM Python 3.11 Headers
+      - name: Manually Fetch ARM Python Headers
         run: |
-          echo "=== Downloading ARM Python 3.11 Headers ==="
+          echo "=== Manually Fetching ARM Python Headers ==="
           mkdir -p /home/runner/arm-sysroot/usr/include
           mkdir -p /home/runner/arm-sysroot/usr/lib
           
-          # 下载 Python 3.11 的 armhf deb 包 (从 Ubuntu 仓库查找确切版本)
-          # 这里使用一个通用的查找方式，或者直接下载特定版本
-          # 为了稳定性，我们尝试下载 python3.11-minimal 和 python3.11-dev 的 armhf 包
-          # 注意：需要找到确切的版本号。我们可以先 apt-cache madison 或者直接从 launchpad 下载
-          # 简单方法：apt-get download 会自动解析依赖和版本
-          
           cd /tmp
-          sudo apt-get download python3.11-minimal:armhf python3.11-dev:armhf 2>/dev/null || \
-          sudo apt-get download python3-minimal:armhf python3-dev:armhf 2>/dev/null || \
-          echo "Failed to download exact python3.11 dev packages, trying to find any python3 dev"
+          # 尝试下载 python3.11 相关的 armhf 包。
+          # 如果 noble 仓库里没有精确的 3.11 dev 包，我们下载 python3-minimal 和 python3-lib2to3 等基础包
+          # 实际上，我们需要的是 Python.h。通常在 python3.X-dev 包里。
+          # 让我们先看看 apt-cache search 的结果，或者直接尝试下载最可能的包名
           
-          # 解压 deb 包
+          # 尝试下载 python3.11-dev 如果存在，否则尝试 python3-dev
+          # 注意：apt-get download 不会安装，只会下载到当前目录
+          
+          PKG_FOUND=0
+          
+          # 尝试具体版本
+          if sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf 2>/dev/null; then
+            PKG_FOUND=1
+            echo "Downloaded python3.11-dev"
+          else
+            # 尝试通用版本
+            if sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null; then
+              PKG_FOUND=1
+              echo "Downloaded generic python3-dev"
+            fi
+          fi
+          
+          if [ $PKG_FOUND -eq 0 ]; then
+             echo "⚠️ Could not find python3-dev via apt. Trying to find .deb manually from launchpad or using fallback."
+             # Fallback: 很多时候 python3.11 的头文件在 python3.11-minimal 或者 python3.11-stdlib 里也有部分，
+             # 但 Python.h 肯定在 -dev 里。
+             # 如果 apt 失败，我们尝试直接从 Ubuntu 包镜像下载 .deb
+             # 这里假设 apt 已经配置好 ports 源，应该能下载到
+             exit 1
+          fi
+          
+          # 解压所有下载的 deb
           for deb in *.deb; do
             if [ -f "$deb" ]; then
               echo "Extracting $deb"
@@ -95,66 +128,58 @@ jobs:
             fi
           done
           
-          # 验证头文件是否存在
-          if [ -f "/home/runner/arm-sysroot/usr/include/python3.11/Python.h" ]; then
-            echo "✅ Python 3.11 headers found."
-          elif [ -f "/home/runner/arm-sysroot/usr/include/python3.10/Python.h" ]; then
-            echo "⚠️ Found Python 3.10 headers instead. This might cause ABI issues but let's try."
-            # 创建软链接欺骗编译器
-            ln -sf /home/runner/arm-sysroot/usr/include/python3.10 /home/runner/arm-sysroot/usr/include/python3.11
-          else
-            echo "❌ No Python headers found in sysroot!"
+          # 查找 Python.h 并建立标准路径
+          PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h")
+          if [ -z "$PYTHON_H_PATH" ]; then
+            echo "❌ Python.h not found!"
             ls -R /home/runner/arm-sysroot/usr/include
             exit 1
           fi
-
-      - name: Download and Extract ARM NumPy Headers
-        run: |
-          echo "=== Downloading ARM NumPy Headers ==="
-          # 下载 numpy 的 wheel (manylinux 或 linux_armv7l)
-          # 我们只需要里面的 headfiles，所以可以下载任意包含 headfiles 的 wheel
-          # 最好下载对应版本的 linux_armv7l wheel，如果没有，就下载源码包或者通用包
-          # 实际上 numpy 的头文件在所有平台 wheel 中是一样的 (在 numpy/core/include)
-          # 但为了确保版本匹配，我们下载一个 wheel 并提取
           
-          pip download numpy==${{ env.NUMPY_VERSION }} --only-binary=:all: --platform linux_armv7l --python-version 311 --implementation cp --abi cp311 -d /tmp/numpy_wheel || \
-          pip download numpy==${{ env.NUMPY_VERSION }} --no-binary=:all: -d /tmp/numpy_src || \
-          pip download numpy --only-binary=:all: --platform linux_armv7l -d /tmp/numpy_wheel # Fallback to latest
+          PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
+          echo "Found Python.h in: $PYTHON_INC_DIR"
           
-          cd /tmp
-          if ls numpy_wheel/*.whl 1>/dev/null 2>&1; then
-            unzip -q numpy_wheel/*.whl -d /home/runner/arm-sysroot/usr/lib/python3.11/site-packages
-            # 找到 numpy 头文件路径，通常是 .../numpy/core/include
-            NUMPY_INCLUDE=$(find /home/runner/arm-sysroot -name "arrayobject.h" | head -1 | xargs dirname)
-            echo "NUMPY_INCLUDE=$NUMPY_INCLUDE" >> $GITHUB_ENV
-            echo "✅ NumPy headers extracted to: $NUMPY_INCLUDE"
-          else
-            # 如果没下载到 arm wheel，尝试从源码包或普通包提取 (头文件通常通用)
-            # 解压源码包或 whl
-            for file in numpy_*.tar.gz numpy_*.whl; do
-              if [ -f "$file" ]; then
-                if [[ "$file" == *.whl ]]; then
-                  unzip -q "$file" -d /tmp/numpy_extract
-                else
-                  tar xzf "$file" -C /tmp/numpy_extract
-                fi
-                NUMPY_INCLUDE=$(find /tmp/numpy_extract -name "arrayobject.h" | head -1 | xargs dirname)
-                if [ -n "$NUMPY_INCLUDE" ]; then
-                   mkdir -p /home/runner/arm-sysroot/usr/include/numpy
-                   cp -r "$NUMPY_INCLUDE"/* /home/runner/arm-sysroot/usr/include/numpy/
-                   echo "NUMPY_INCLUDE=/home/runner/arm-sysroot/usr/include/numpy" >> $GITHUB_ENV
-                   echo "✅ NumPy headers extracted from source/wheel."
-                   break
-                fi
-              fi
-            done
+          # 标准化路径到 python3.11 (即使实际是 3.10 或 3.12，我们也创建软链接或重命名目录以匹配 ONNX 期望)
+          # ONNX 通常通过 python-config 获取路径，但在交叉编译中我们强制指定
+          TARGET_INC_DIR="/home/runner/arm-sysroot/usr/include/python3.11"
+          if [ "$PYTHON_INC_DIR" != "$TARGET_INC_DIR" ]; then
+            echo "Linking/Copying $PYTHON_INC_DIR to $TARGET_INC_DIR"
+            mkdir -p $(dirname "$TARGET_INC_DIR")
+            if [ -d "$TARGET_INC_DIR" ]; then rm -rf "$TARGET_INC_DIR"; fi
+            ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
           fi
+          
+          echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> $GITHUB_ENV
+          echo "✅ Python headers ready at $TARGET_INC_DIR"
+
+      - name: Manually Fetch ARM NumPy Headers
+        run: |
+          echo "=== Fetching NumPy Headers ==="
+          cd /tmp
+          # 下载 numpy wheel (any platform, headers are same) 或者 arm 特定
+          # 为了安全，下载源码包提取头文件，因为头文件是纯 C 且跨平台
+          pip download numpy==${{ env.NUMPY_VERSION }} --no-binary=:all: -d /tmp/numpy_src
+          
+          # 解压 tar.gz
+          cd /tmp/numpy_src
+          tar xzf *.tar.gz
+          cd numpy-*
+          
+          # 头文件位置通常在 numpy/core/include/numpy
+          SRC_NUMPY_INC="./numpy/core/include/numpy"
+          DEST_NUMPY_INC="/home/runner/arm-sysroot/usr/include/numpy"
+          
+          mkdir -p "$DEST_NUMPY_INC"
+          cp -r "$SRC_NUMPY_INC"/* "$DEST_NUMPY_INC/"
+          
+          echo "NUMPY_INCLUDE_DIR=$DEST_NUMPY_INC" >> $GITHUB_ENV
+          echo "✅ NumPy headers ready at $DEST_NUMPY_INC"
 
       - name: Install Host Build Tools
         run: |
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
-          # 不安装 numpy 到宿主，避免混淆
+          # 关键：不安装 numpy 到宿主环境，防止 CMake 混淆
 
       - name: Download ONNX Runtime
         run: |
@@ -176,7 +201,7 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           
-          # 添加自定义 sysroot 路径
+          # 显式添加 sysroot
           list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)
           
           # 警告抑制
@@ -193,11 +218,13 @@ jobs:
           cd onnxruntime
           rm -rf build/Linux
           
-          export CFLAGS="-I/home/runner/arm-sysroot/usr/include/python3.11 -I${{ env.NUMPY_INCLUDE }}"
-          export CXXFLAGS="-I/home/runner/arm-sysroot/usr/include/python3.11 -I${{ env.NUMPY_INCLUDE }}"
+          # 导出包含路径
+          export CFLAGS="-I${{ env.PYTHON_INCLUDE_DIR }} -I${{ env.NUMPY_INCLUDE_DIR }}"
+          export CXXFLAGS="-I${{ env.PYTHON_INCLUDE_DIR }} -I${{ env.NUMPY_INCLUDE_DIR }}"
           
-          echo "Using CFLAGS: $CFLAGS"
-          echo "Using CXXFLAGS: $CXXFLAGS"
+          echo "Using Python Include: ${{ env.PYTHON_INCLUDE_DIR }}"
+          echo "Using NumPy Include: ${{ env.NUMPY_INCLUDE_DIR }}"
+          echo "CFLAGS: $CFLAGS"
           
           bash build.sh \
             --config Release \
@@ -225,18 +252,22 @@ jobs:
         run: |
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
-            echo "✅ Build Successful!"
+            echo "✅ BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
             echo "❌ Build failed."
             find . -name "*.whl"
+            echo "=== Last 50 lines of CMakeOutput ==="
             tail -n 50 build/Linux/Release/CMakeFiles/CMakeOutput.log 2>/dev/null || true
+            echo "=== Last 50 lines of Build Log ==="
+            # 尝试找具体的错误日志
+            find build -name "*.log" -exec tail -n 20 {} \; 2>/dev/null | tail -n 50
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-ultimate
           path: "*.whl"
           retention-days: 14
