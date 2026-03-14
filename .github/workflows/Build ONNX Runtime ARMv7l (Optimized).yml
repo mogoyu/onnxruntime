@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Cross-Compile Fixed v2)
+name: Build onnxruntime for ARMv7l (Cross-Compile Fixed v3)
 
 on:
   workflow_dispatch:
@@ -53,30 +53,47 @@ jobs:
           echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
           wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
           
-          echo "=== Checking tar.gz structure BEFORE extract ==="
-          tar tzf onnxruntime-src.tar.gz | head -20
+          echo "=== Clean up any existing directories ==="
+          rm -rf onnxruntime onnxruntime-src
           
-          echo "=== Extracting ==="
+          echo "=== Extracting with --strip-components=1 ==="
           mkdir -p onnxruntime-src
           tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
+          echo "✅ Extract complete"
           
-          echo "=== Directory structure AFTER extract ==="
-          ls -la onnxruntime-src/
-          
-          echo "=== Check build.sh location ==="
+          echo "=== Verify build.sh exists in onnxruntime-src ==="
           if [ -f "onnxruntime-src/build.sh" ]; then
-            echo "✅ build.sh found in onnxruntime-src/"
-          elif [ -f "build.sh" ]; then
-            echo "⚠️ build.sh found in root directory"
+            echo "✅ build.sh found"
+            ls -lh onnxruntime-src/build.sh
           else
-            echo "❌ build.sh NOT FOUND"
-            find . -name "build.sh" -type f
+            echo "❌ build.sh NOT found in onnxruntime-src"
+            echo "=== Contents of onnxruntime-src ==="
+            ls -la onnxruntime-src/
             exit 1
           fi
           
-          echo "=== Rename to onnxruntime ==="
+          echo "=== Rename onnxruntime-src to onnxruntime ==="
           mv onnxruntime-src onnxruntime
-          ls -la onnxruntime/build.sh
+          if [ $? -ne 0 ]; then
+            echo "❌ mv command failed!"
+            exit 1
+          fi
+          echo "✅ mv complete"
+          
+          echo "=== Final verification ==="
+          if [ -f "onnxruntime/build.sh" ]; then
+            echo "✅ SUCCESS: onnxruntime/build.sh exists"
+            ls -lh onnxruntime/build.sh
+          else
+            echo "❌ FAIL: onnxruntime/build.sh NOT found"
+            echo "=== Current directory ==="
+            pwd
+            echo "=== Contents of current directory ==="
+            ls -la
+            echo "=== Contents of onnxruntime directory ==="
+            ls -la onnxruntime/ 2>/dev/null || echo "onnxruntime directory does not exist"
+            exit 1
+          fi
 
       - name: Create Toolchain File
         run: |
@@ -90,13 +107,17 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           EOF
+          echo "✅ Toolchain file created"
 
       - name: Build ONNX Runtime (Cross-Compile)
         run: |
           echo "=== Starting Build ==="
           cd onnxruntime
+          echo "=== Current directory ==="
           pwd
-          ls -la build.sh
+          echo "=== Verify build.sh ==="
+          ls -lh build.sh
+          echo "=== Running build.sh ==="
           bash build.sh \
             --config Release \
             --update \
@@ -121,6 +142,7 @@ jobs:
           find . -name "*.whl" -type f
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
+            echo "=== Wheel Files ==="
             ls -lh *.whl
           else
             echo "ERROR: No wheel file found!"
