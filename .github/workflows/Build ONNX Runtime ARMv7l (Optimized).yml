@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Verified Fixed)
+name: Build onnxruntime for ARMv7l (Final Verified)
 
 on:
   workflow_dispatch:
@@ -55,18 +55,6 @@ jobs:
             libeigen3-dev \
             pkg-config \
             || echo "Some packages skipped"
-
-      - name: Install ARMHF Libraries (Best Effort)
-        run: |
-          sudo apt-get install -y --ignore-missing \
-            zlib1g-dev:armhf \
-            libbz2-dev:armhf \
-            liblzma-dev:armhf \
-            libsqlite3-dev:armhf \
-            libexpat1-dev:armhf \
-            libssl-dev:armhf \
-            libffi-dev:armhf \
-            || echo "Some armhf packages skipped"
 
       - name: Fetch ARM Python Headers
         run: |
@@ -130,37 +118,26 @@ jobs:
           set(onnxruntime_BUILD_UNIT_TESTS OFF)
           EOF
 
-      - name: Find Correct Python Library (VERIFIED)
+      - name: Find Correct Python Library
         run: |
-          # 验证 Python 版本
           echo "Python version: $(python3 --version)"
           echo "Python executable: $(which python3)"
           
-          # 获取 Python 库目录
           PYTHON_LIB_DIR=$(python3 -c "import sysconfig; print(sysconfig.get_config_var('LIBDIR'))")
           echo "Python LIBDIR: $PYTHON_LIB_DIR"
           
-          # 查找 Python 库文件
           PYTHON_LIB_FILE=$(find "$PYTHON_LIB_DIR" -name "libpython3.11*" 2>/dev/null | head -n 1)
           if [ -z "$PYTHON_LIB_FILE" ]; then
             PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3.11*" 2>/dev/null | head -n 1)
           fi
           if [ -z "$PYTHON_LIB_FILE" ]; then
-            # 尝试找 .a 静态库
             PYTHON_LIB_FILE=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3*.a" 2>/dev/null | head -n 1)
           fi
           
           echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
           echo "Using Python library: $PYTHON_LIB_FILE"
-          
-          # 验证文件存在
-          if [ -f "$PYTHON_LIB_FILE" ]; then
-            echo "✓ Python library file exists"
-          else
-            echo "✗ Python library file NOT found, will try to continue anyway"
-          fi
 
-      - name: Build ONNX Runtime (Using build.sh CORRECTLY)
+      - name: Build ONNX Runtime (XNNPACK DISABLED)
         run: |
           cd onnxruntime
           rm -rf build/Linux
@@ -170,11 +147,8 @@ jobs:
           echo "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}"
           echo "SYSROOT_DIR=${SYSROOT_DIR}"
           echo "PYTHON_LIBRARY=${PYTHON_LIBRARY}"
-          echo "Python executable: $(which python3)"
-          echo "Python version: $(python3 --version)"
           echo "==========================="
           
-          # 使用 build.sh，但 NOT 使用 --cmake_generator 参数
           bash build.sh \
             --config Release \
             --update \
@@ -203,7 +177,7 @@ jobs:
               onnxruntime_USE_DNNL=OFF \
               onnxruntime_USE_ACL=OFF \
               onnxruntime_USE_ARMNN=OFF \
-              onnxruntime_USE_XNNPACK=ON \
+              onnxruntime_USE_XNNPACK=OFF \
               onnxruntime_ENABLE_LTO=OFF \
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
@@ -212,10 +186,10 @@ jobs:
             2>&1 | tee ../build_output.log || BUILD_FAILED=1
           
           if [ "$BUILD_FAILED" = "1" ]; then
-            echo "=== Build Failed! Showing last 200 lines ==="
+            echo "=== Build Failed! ==="
             tail -200 ../build_output.log
-            echo "=== Checking for actual errors (not notes) ==="
-            grep -E "error:|Error:|fatal error" ../build_output.log | head -50 || true
+            echo "=== Real errors ==="
+            grep -iE "error:|fatal error" ../build_output.log | head -50 || true
             exit 1
           fi
 
@@ -227,7 +201,6 @@ jobs:
             ls -lh *.whl
           else
             echo "Build failed. Checking logs..."
-            find onnxruntime/build -name "*.log" -exec tail -50 {} \; 2>/dev/null || true
             find onnxruntime/build -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
             exit 1
           fi
@@ -235,6 +208,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-verified"
+          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final"
           path: "*.whl"
           retention-days: 14
