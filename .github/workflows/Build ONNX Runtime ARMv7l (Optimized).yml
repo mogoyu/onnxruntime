@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (With Full Error Capture)
+name: Build onnxruntime for ARMv7l (Final Fixed)
 
 on:
   workflow_dispatch:
@@ -96,6 +96,39 @@ jobs:
           mkdir -p onnxruntime
           tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
 
+      - name: Patch cpuid_info.cc (Fix cpuinfo cross-compile issue)
+        run: |
+          CPUID_FILE="onnxruntime/onnxruntime/core/common/cpuid_info.cc"
+          
+          # 备份原文件
+          cp "$CPUID_FILE" "$CPUID_FILE.bak"
+          
+          # 替换 ArmLinuxInit 函数为空实现
+          cat > /tmp/cpuid_patch.py << 'PYEOF'
+          import re
+          
+          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "r") as f:
+              content = f.read()
+          
+          # 找到 ArmLinuxInit 函数并替换为空实现
+          pattern = r'(void CPUIDInfo::ArmLinuxInit\(\)[^{]*\{)[^}]*\}'
+          replacement = '''void CPUIDInfo::ArmLinuxInit() {
+              // Cross-compile: skip cpuinfo detection
+              is_hybrid_ = false;
+              has_arm_neon_dot_ = false;
+              has_fp16_ = false;
+          }'''
+          
+          content = re.sub(pattern, replacement, content, flags=re.DOTALL)
+          
+          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "w") as f:
+              f.write(content)
+          
+          print("Patched cpuid_info.cc successfully")
+          PYEOF
+          
+          python3 /tmp/cpuid_patch.py
+
       - name: Create Toolchain File
         run: |
           cat > "${{ github.workspace }}/toolchain-armv7.cmake" << 'EOF'
@@ -124,7 +157,7 @@ jobs:
           echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
           echo "Using Python library: $PYTHON_LIB_FILE"
 
-      - name: Build ONNX Runtime (Single Thread for Debug)
+      - name: Build ONNX Runtime
         run: |
           cd onnxruntime
           rm -rf build/Linux
@@ -133,7 +166,6 @@ jobs:
           env | grep -E "PYTHON|NUMPY|SYSROOT" || true
           echo "==========================="
           
-          # 使用单线程构建以便捕获完整错误
           bash build.sh \
             --config Release \
             --update \
@@ -141,7 +173,7 @@ jobs:
             --build_wheel \
             --skip_tests \
             --enable_pybind \
-            --parallel 1 \
+            --parallel 2 \
             --allow_running_as_root \
             --skip_submodule_sync \
             --cmake_extra_defines \
@@ -165,24 +197,15 @@ jobs:
               onnxruntime_USE_XNNPACK=OFF \
               onnxruntime_ENABLE_LTO=OFF \
               onnxruntime_BUILD_WEBASSEMBLY=OFF \
-              onnxruntime_BUILD_WEBASSEMBLY_BENCHMARKS=OFF \
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
               Python3_LIBRARY=${PYTHON_LIBRARY} \
-            2>&1 | tee ../build_full.log
+            2>&1 | tee ../build_full.log || BUILD_FAILED=1
           
-          BUILD_STATUS=$?
-          
-          if [ $BUILD_STATUS -ne 0 ]; then
+          if [ "$BUILD_FAILED" = "1" ]; then
             echo "=== BUILD FAILED ==="
-            echo "=== Last 300 lines of build log ==="
             tail -300 ../build_full.log
-            echo "=== Searching for errors ==="
             grep -in "error:" ../build_full.log | tail -30 || true
-            echo "=== CMakeError.log ==="
-            find build -name "CMakeError.log" -exec cat {} \; 2>/dev/null || true
-            echo "=== CMakeOutput.log (last 100 lines) ==="
-            find build -name "CMakeOutput.log" -exec tail -100 {} \; 2>/dev/null || true
             exit 1
           fi
 
@@ -193,9 +216,8 @@ jobs:
             echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "No wheel found. Checking build directory..."
+            echo "No wheel found."
             find onnxruntime/build -name "*.whl" 2>/dev/null || true
-            ls -la onnxruntime/build/Linux/Release/ || true
             exit 1
           fi
 
