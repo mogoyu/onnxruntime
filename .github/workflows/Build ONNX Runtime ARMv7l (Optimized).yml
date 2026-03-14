@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Ultimate Fix - Clean Sources)
+name: Build onnxruntime for ARMv7l (Final Syntax Fix)
 
 on:
   workflow_dispatch:
@@ -27,32 +27,21 @@ jobs:
       - name: Prepare Clean Apt Sources for ARMHF
         run: |
           echo "=== Nuking existing apt sources ==="
-          # 备份
           sudo cp -r /etc/apt /etc/apt.bak
-          
-          # 1. 添加 armhf 架构
           sudo dpkg --add-architecture armhf
           
-          # 2. 彻底重写 /etc/apt/sources.list 只使用 ports.ubuntu.com
-          # Ubuntu 24.04 (Noble) 的 codename 是 noble
-          sudo tee /etc/apt/sources.list > /dev/null <<EOF
-deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
-deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
-EOF
+          echo "deb http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse" | sudo tee /etc/apt/sources.list
+          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
+          echo "deb http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse" | sudo tee -a /etc/apt/sources.list
           
-          # 3. 删除 /etc/apt/sources.list.d/ 下所有可能包含 security.ubuntu.com 的文件
           sudo rm -rf /etc/apt/sources.list.d/*
           
-          # 4. 更新 apt
-          echo "=== Updating apt with clean ports sources ==="
+          echo "=== Updating apt ==="
           sudo apt-get update
-          
-          # 验证：确保没有 armhf 相关的 error
           echo "=== Apt update finished ==="
 
-      - name: Install Cross Toolchain (No Python Dev via Apt)
+      - name: Install Cross Toolchain
         run: |
           echo "=== Installing Cross Toolchain ==="
           sudo apt-get install -y \
@@ -79,48 +68,20 @@ EOF
             libmpdec-dev:armhf \
             libexpat1-dev:armhf \
             uuid-dev:armhf \
-            libxcrypt-dev:armhf \
-            || echo "Some optional packages skipped"
+            libxcrypt-dev:armhf || echo "Some optional packages skipped"
 
       - name: Manually Fetch ARM Python Headers
         run: |
-          echo "=== Manually Fetching ARM Python Headers ==="
+          echo "=== Fetching ARM Python Headers ==="
           mkdir -p /home/runner/arm-sysroot/usr/include
           mkdir -p /home/runner/arm-sysroot/usr/lib
           
           cd /tmp
-          # 尝试下载 python3.11 相关的 armhf 包。
-          # 如果 noble 仓库里没有精确的 3.11 dev 包，我们下载 python3-minimal 和 python3-lib2to3 等基础包
-          # 实际上，我们需要的是 Python.h。通常在 python3.X-dev 包里。
-          # 让我们先看看 apt-cache search 的结果，或者直接尝试下载最可能的包名
-          
-          # 尝试下载 python3.11-dev 如果存在，否则尝试 python3-dev
-          # 注意：apt-get download 不会安装，只会下载到当前目录
-          
-          PKG_FOUND=0
-          
-          # 尝试具体版本
-          if sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf 2>/dev/null; then
-            PKG_FOUND=1
-            echo "Downloaded python3.11-dev"
-          else
-            # 尝试通用版本
-            if sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null; then
-              PKG_FOUND=1
-              echo "Downloaded generic python3-dev"
-            fi
+          if ! sudo apt-get download python3.11-dev:armhf python3.11-minimal:armhf 2>/dev/null; then
+            echo "Trying generic python3-dev..."
+            sudo apt-get download python3-dev:armhf python3-minimal:armhf 2>/dev/null || exit 1
           fi
           
-          if [ $PKG_FOUND -eq 0 ]; then
-             echo "⚠️ Could not find python3-dev via apt. Trying to find .deb manually from launchpad or using fallback."
-             # Fallback: 很多时候 python3.11 的头文件在 python3.11-minimal 或者 python3.11-stdlib 里也有部分，
-             # 但 Python.h 肯定在 -dev 里。
-             # 如果 apt 失败，我们尝试直接从 Ubuntu 包镜像下载 .deb
-             # 这里假设 apt 已经配置好 ports 源，应该能下载到
-             exit 1
-          fi
-          
-          # 解压所有下载的 deb
           for deb in *.deb; do
             if [ -f "$deb" ]; then
               echo "Extracting $deb"
@@ -128,10 +89,9 @@ EOF
             fi
           done
           
-          # 查找 Python.h 并建立标准路径
-          PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h")
+          PYTHON_H_PATH=$(find /home/runner/arm-sysroot -name "Python.h" | head -n 1)
           if [ -z "$PYTHON_H_PATH" ]; then
-            echo "❌ Python.h not found!"
+            echo "Error: Python.h not found!"
             ls -R /home/runner/arm-sysroot/usr/include
             exit 1
           fi
@@ -139,47 +99,43 @@ EOF
           PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
           echo "Found Python.h in: $PYTHON_INC_DIR"
           
-          # 标准化路径到 python3.11 (即使实际是 3.10 或 3.12，我们也创建软链接或重命名目录以匹配 ONNX 期望)
-          # ONNX 通常通过 python-config 获取路径，但在交叉编译中我们强制指定
           TARGET_INC_DIR="/home/runner/arm-sysroot/usr/include/python3.11"
           if [ "$PYTHON_INC_DIR" != "$TARGET_INC_DIR" ]; then
-            echo "Linking/Copying $PYTHON_INC_DIR to $TARGET_INC_DIR"
-            mkdir -p $(dirname "$TARGET_INC_DIR")
+            echo "Linking $PYTHON_INC_DIR to $TARGET_INC_DIR"
+            mkdir -p "$(dirname "$TARGET_INC_DIR")"
             if [ -d "$TARGET_INC_DIR" ]; then rm -rf "$TARGET_INC_DIR"; fi
             ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
           fi
           
+          # 写入 GITHUB_ENV
           echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> $GITHUB_ENV
-          echo "✅ Python headers ready at $TARGET_INC_DIR"
+          echo "Python headers ready."
 
       - name: Manually Fetch ARM NumPy Headers
         run: |
           echo "=== Fetching NumPy Headers ==="
           cd /tmp
-          # 下载 numpy wheel (any platform, headers are same) 或者 arm 特定
-          # 为了安全，下载源码包提取头文件，因为头文件是纯 C 且跨平台
           pip download numpy==${{ env.NUMPY_VERSION }} --no-binary=:all: -d /tmp/numpy_src
           
-          # 解压 tar.gz
           cd /tmp/numpy_src
-          tar xzf *.tar.gz
+          TAR_FILE=$(ls *.tar.gz | head -n 1)
+          tar xzf "$TAR_FILE"
           cd numpy-*
           
-          # 头文件位置通常在 numpy/core/include/numpy
           SRC_NUMPY_INC="./numpy/core/include/numpy"
           DEST_NUMPY_INC="/home/runner/arm-sysroot/usr/include/numpy"
           
           mkdir -p "$DEST_NUMPY_INC"
           cp -r "$SRC_NUMPY_INC"/* "$DEST_NUMPY_INC/"
           
+          # 写入 GITHUB_ENV
           echo "NUMPY_INCLUDE_DIR=$DEST_NUMPY_INC" >> $GITHUB_ENV
-          echo "✅ NumPy headers ready at $DEST_NUMPY_INC"
+          echo "NumPy headers ready."
 
       - name: Install Host Build Tools
         run: |
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
-          # 关键：不安装 numpy 到宿主环境，防止 CMake 混淆
 
       - name: Download ONNX Runtime
         run: |
@@ -187,43 +143,38 @@ EOF
           rm -rf onnxruntime
           mkdir -p onnxruntime
           tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
-          echo "✅ Source ready"
+          echo "Source ready."
 
       - name: Create Toolchain File
         run: |
-          cat <<EOF > /home/runner/toolchain-armv7.cmake
-          set(CMAKE_SYSTEM_NAME Linux)
-          set(CMAKE_SYSTEM_PROCESSOR armv7l)
-          set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)
-          set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)
-          set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
-          set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
-          set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          
-          # 显式添加 sysroot
-          list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)
-          
-          # 警告抑制
-          set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -fPIC")
-          set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -Wno-class-memaccess -fPIC")
-          
-          set(onnxruntime_BUILD_TESTS OFF)
-          set(onnxruntime_BUILD_UNIT_TESTS OFF)
-          EOF
-          echo "✅ Toolchain created"
+          TOOLCHAIN_FILE="/home/runner/toolchain-armv7.cmake"
+          echo "set(CMAKE_SYSTEM_NAME Linux)" > "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_SYSTEM_PROCESSOR armv7l)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_C_COMPILER arm-linux-gnueabihf-gcc)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_CXX_COMPILER arm-linux-gnueabihf-g++)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)" >> "$TOOLCHAIN_FILE"
+          echo "list(APPEND CMAKE_FIND_ROOT_PATH /home/runner/arm-sysroot)" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_C_FLAGS \"\${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -fPIC\")" >> "$TOOLCHAIN_FILE"
+          echo "set(CMAKE_CXX_FLAGS \"\${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -Wno-class-memaccess -fPIC\")" >> "$TOOLCHAIN_FILE"
+          echo "set(onnxruntime_BUILD_TESTS OFF)" >> "$TOOLCHAIN_FILE"
+          echo "set(onnxruntime_BUILD_UNIT_TESTS OFF)" >> "$TOOLCHAIN_FILE"
+          echo "Toolchain file created."
 
       - name: Build ONNX Runtime
         run: |
           cd onnxruntime
           rm -rf build/Linux
           
-          # 导出包含路径
-          export CFLAGS="-I${{ env.PYTHON_INCLUDE_DIR }} -I${{ env.NUMPY_INCLUDE_DIR }}"
-          export CXXFLAGS="-I${{ env.PYTHON_INCLUDE_DIR }} -I${{ env.NUMPY_INCLUDE_DIR }}"
+          # 【关键修复】直接使用 $VAR_NAME，不要使用 ${{ env.VAR_NAME }}
+          # GitHub Actions 会自动将上一步写入 $GITHUB_ENV 的变量注入到当前 shell 环境
+          export CFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
+          export CXXFLAGS="-I$PYTHON_INCLUDE_DIR -I$NUMPY_INCLUDE_DIR"
           
-          echo "Using Python Include: ${{ env.PYTHON_INCLUDE_DIR }}"
-          echo "Using NumPy Include: ${{ env.NUMPY_INCLUDE_DIR }}"
+          echo "Building with Python Include: $PYTHON_INCLUDE_DIR"
+          echo "Building with NumPy Include: $NUMPY_INCLUDE_DIR"
           echo "CFLAGS: $CFLAGS"
           
           bash build.sh \
@@ -252,22 +203,18 @@ EOF
         run: |
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
-            echo "✅ BUILD SUCCESSFUL!"
+            echo "BUILD SUCCESSFUL!"
             ls -lh *.whl
           else
-            echo "❌ Build failed."
+            echo "Build failed."
             find . -name "*.whl"
-            echo "=== Last 50 lines of CMakeOutput ==="
             tail -n 50 build/Linux/Release/CMakeFiles/CMakeOutput.log 2>/dev/null || true
-            echo "=== Last 50 lines of Build Log ==="
-            # 尝试找具体的错误日志
-            find build -name "*.log" -exec tail -n 20 {} \; 2>/dev/null | tail -n 50
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-ultimate
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-final-fixed
           path: "*.whl"
           retention-days: 14
