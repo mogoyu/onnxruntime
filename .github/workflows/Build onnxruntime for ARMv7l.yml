@@ -23,12 +23,14 @@ jobs:
         run: |
           ./dockcross bash -c "
             set -e
+            # 安装编译 Python 和 ONNX Runtime 所需的依赖，包括 expat
             apt-get update && apt-get install -y --no-install-recommends \
               wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
               cmake make \
               libexpat1-dev
 
+            # 下载 Python 源码
             PYTHON_VERSION=3.11.9
             wget -q https://www.python.org/ftp/python/\$PYTHON_VERSION/Python-\$PYTHON_VERSION.tar.xz
             tar -xf Python-\$PYTHON_VERSION.tar.xz
@@ -36,15 +38,18 @@ jobs:
             # 1. 编译本机 Python（host版本，用于交叉编译过程）
             (
               cd Python-\$PYTHON_VERSION
+              # 清除所有交叉编译环境变量，强制使用本机编译器
               unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
               export CC=/usr/bin/gcc
               export CXX=/usr/bin/g++
+              # 显式使用系统 expat，确保 pyexpat 模块被编译
               ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu --with-system-expat
               make -j\$(nproc)
               make install
             )
 
             # 2. 交叉编译目标 Python（armv7版本）
+            # 重新解压源码以确保干净
             rm -rf Python-\$PYTHON_VERSION
             tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
@@ -52,6 +57,7 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
+            # dockcross 已自动设置正确的交叉编译器环境变量（CC、CXX等），无需手动干预
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -67,13 +73,11 @@ jobs:
             cd ..
             rm -rf Python-\$PYTHON_VERSION*
 
-            # 注意：不再手动运行 python3.11 -m ensurepip，因为 make install 已经运行了 ensurepip
-            # 确保本机 Python 优先
-            export PATH=/opt/host-python/bin:\$PATH
-            # 打印确认
-            which python3.11
-            python3.11 --version
+            # 安装 pip 和构建工具（此时 python3.11 为 armv7 可执行文件，通过 QEMU 运行）
+            python3.11 -m ensurepip --upgrade
+            python3.11 -m pip install --upgrade pip setuptools wheel
 
+            # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
 
@@ -92,11 +96,12 @@ jobs:
             set -e
             cd onnxruntime-1.19.2
 
-            # 确保本机 Python 在 PATH 中优先
+            # 确保本机 Python 在 PATH 中优先（避免错误执行 ARM 可执行文件）
             export PATH=/opt/host-python/bin:\$PATH
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
-            TOOLCHAIN_FILE=/usr/share/cmake/toolchain.cmake
+            # 使用 dockcross 提供的工具链文件环境变量
+            TOOLCHAIN_FILE=\${DEFAULT_DOCKCROSS_CMAKE_TOOLCHAIN}
 
             echo 'Using toolchain: \$TOOLCHAIN_FILE'
             cat \$TOOLCHAIN_FILE
