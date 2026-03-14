@@ -112,9 +112,6 @@ jobs:
             # 使用 ONNX Runtime 官方提供的 ARM Linux 工具链文件
             ONNX_ARM_TOOLCHAIN=\$(pwd)/tools/cmake/platforms/LinuxARM.cmake
             echo 'Using ONNX ARM toolchain: \$ONNX_ARM_TOOLCHAIN'
-            
-            # 同时使用 dockcross 的环境变量设置
-            # 注意：ONNX Runtime 的 LinuxARM.cmake 会自动使用交叉编译器
 
             python3.11 tools/ci_build/build.py \
               --build_dir build \
@@ -126,8 +123,8 @@ jobs:
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
-              --parallel
-          "
+              --parallel \
+              --allow_running_as_root
           "
 
       - name: Copy wheel to host
