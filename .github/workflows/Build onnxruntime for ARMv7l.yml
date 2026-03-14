@@ -65,6 +65,7 @@ jobs:
               --with-build-python=/opt/host-python/bin/python3.11 \
               --enable-optimizations \
               --with-system-expat \
+              --disable-ipv6 \
               ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=yes
 
             make -j\$(nproc)
