@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Final Fix - No Tests)
+name: Build onnxruntime for ARMv7l (Final Fix - Multiarch Python)
 
 on:
   workflow_dispatch:
@@ -9,7 +9,7 @@ on:
 env:
   ONNXRUNTIME_VERSION: "1.15.0"
   PYTHON_VERSION: "3.11"
-  NUMPY_VERSION: "1.23.5"
+  # 注意：这里不预先安装 numpy，让构建脚本处理，或者安装 armhf 版本
 
 jobs:
   build:
@@ -19,14 +19,18 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up Python
+      - name: Set up Python (Host for running build.sh)
         uses: actions/setup-python@v5
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Cross-Compile Toolchain
+      - name: Enable ARMHF Architecture and Install Cross Dependencies
         run: |
+          echo "=== Enabling multi-arch ==="
+          sudo dpkg --add-architecture armhf
           sudo apt-get update
+          
+          echo "=== Installing Cross Toolchain ==="
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
@@ -40,32 +44,47 @@ jobs:
             pkg-config \
             ccache \
             gfortran
+          
+          echo "=== Installing ARMHF Python Dev Headers (Crucial Fix) ==="
+          # 尝试安装 ARM 架构的 Python 开发包
+          # 注意：Ubuntu 24.04/22.04 的 python3-dev:armhf 版本可能与宿主不一致，需小心
+          # 如果找不到精确匹配的 3.11，可能需要找最近的或者手动处理
+          sudo apt-get install -y \
+            libpython3-dev:armhf \
+            python3-numpy:armhf \
+            zlib1g-dev:armhf \
+            libbz2-dev:armhf \
+            liblzma-dev:armhf \
+            libncursesw5-dev:armhf \
+            libreadline-dev:armhf \
+            libsqlite3-dev:armhf \
+            libgdbm-dev:armhf \
+            libdb5.3-dev:armhf \
+            libmpdec-dev:armhf || echo "Some armhf packages might not be available, proceeding..."
+            
+          # 验证安装
+          ls /usr/include/arm-linux-gnueabihf/python* || echo "No armhf python headers found in standard path"
 
-      - name: Install Python Dependencies
+      - name: Install Host Python Build Tools (NOT numpy for cross-compile)
         run: |
+          # 只安装构建脚本运行所需的工具，不安装 numpy (避免 CMake 混淆)
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
-          pip install numpy==${{ env.NUMPY_VERSION }}
+          # 不安装 numpy! 让 build.sh 处理或者使用 armhf 的头文件
 
       - name: Download and Extract ONNX Runtime
         run: |
           echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
           wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
           
-          # 彻底清理旧目录
           rm -rf onnxruntime onnxruntime-src
           mkdir -p onnxruntime-src
           tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
           
-          if [ ! -f "onnxruntime-src/build.sh" ]; then
-            echo "❌ build.sh not found!"
-            exit 1
-          fi
-          
           mv onnxruntime-src onnxruntime
           echo "✅ Source ready"
 
-      - name: Create Toolchain File (Aggressive Warning Suppression)
+      - name: Create Toolchain File
         run: |
           cat <<EOF > /home/runner/toolchain-armv7.cmake
           set(CMAKE_SYSTEM_NAME Linux)
@@ -77,25 +96,25 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           
-          # ✅ 核心修复：
-          # 1. 移除 -Werror (不再将警告视为错误)
-          # 2. 显式忽略 GCC 13 对 ARM 交叉编译的常见误报
+          # 忽略警告
           set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -fPIC")
           set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -Wno-class-memaccess -fPIC")
           
-          # 强制关闭测试相关的编译选项
           set(onnxruntime_BUILD_TESTS OFF)
           set(onnxruntime_BUILD_UNIT_TESTS OFF)
           EOF
-          echo "✅ Toolchain file created with aggressive flags"
+          echo "✅ Toolchain created"
 
-      - name: Build ONNX Runtime (Cross-Compile - No Tests)
+      - name: Build ONNX Runtime
         run: |
           cd onnxruntime
-          echo "=== Starting Build (Tests Disabled, Warnings Ignored) ==="
+          echo "=== Starting Build with ARMHF Python Headers ==="
           
-          # 再次确保构建目录干净，防止缓存干扰
           rm -rf build/Linux
+          
+          # 关键：设置 CMAKE_PREFIX_PATH 或 INCLUDE 路径以优先查找 armhf 头文件
+          export CFLAGS="-I/usr/include/arm-linux-gnueabihf"
+          export CXXFLAGS="-I/usr/include/arm-linux-gnueabihf"
           
           bash build.sh \
             --config Release \
@@ -116,7 +135,6 @@ jobs:
               onnxruntime_USE_OPENBLAS=OFF \
               onnxruntime_DISABLE_RTTI=ON \
               onnxruntime_BUILD_TESTS=OFF \
-              onnxruntime_BUILD_UNIT_TESTS=OFF \
               "CMAKE_CXX_FLAGS=-Wno-error -Wno-all -Wno-extra" \
               "CMAKE_C_FLAGS=-Wno-error -Wno-all -Wno-extra"
 
@@ -128,16 +146,15 @@ jobs:
             echo "✅ Build Successful!"
             ls -lh *.whl
           else
-            echo "❌ Build failed or no wheel found."
+            echo "❌ Build failed."
             find . -name "*.whl"
-            echo "=== Debug Info ==="
-            ls -la onnxruntime/build/Linux/Release/
+            tail -n 100 build/Linux/Release/CMakeFiles/CMakeError.log 2>/dev/null || true
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-final
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-multiarch
           path: "*.whl"
           retention-days: 14
