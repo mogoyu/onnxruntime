@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Verified Paths)
+name: Build onnxruntime for ARMv7l (Fixed NumPy Headers)
 
 on:
   workflow_dispatch:
@@ -23,6 +23,10 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "${{ env.PYTHON_VERSION }}"
+
+      - name: Upgrade pip and setuptools
+        run: |
+          pip install --upgrade pip setuptools wheel
 
       - name: Add ARMHF Architecture and Sources
         run: |
@@ -83,31 +87,31 @@ jobs:
           PYTHON_H_PATH=$(find "$SYSROOT_DIR" -name "Python.h" 2>/dev/null | head -n 1)
           if [ -n "$PYTHON_H_PATH" ]; then
             PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
-            TARGET_INC_DIR="$SYSROOT_DIR/usr/include/python3.11"
+            TARGET_INC_DIR="$SYSROOT_DIR/usr/include/python3"
             mkdir -p "$(dirname "$TARGET_INC_DIR")"
             ln -sf "$PYTHON_INC_DIR" "$TARGET_INC_DIR"
             echo "PYTHON_INCLUDE_DIR=$TARGET_INC_DIR" >> "$GITHUB_ENV"
           else
-            echo "PYTHON_INCLUDE_DIR=$SYSROOT_DIR/usr/include/python3.11" >> "$GITHUB_ENV"
+            echo "PYTHON_INCLUDE_DIR=$SYSROOT_DIR/usr/include/python3" >> "$GITHUB_ENV"
           fi
           echo "SYSROOT_DIR=$SYSROOT_DIR" >> "$GITHUB_ENV"
 
-      - name: Fetch ARM NumPy Headers
+      - name: Fetch NumPy Headers (Fixed)
         run: |
-          cd /tmp
-          pip download "numpy==${{ env.NUMPY_VERSION }}" --no-binary=:all: -d /tmp/numpy_src
-          cd /tmp/numpy_src
-          tar xzf "$(ls *.tar.gz | head -n 1)"
-          cd numpy-*
+          # 先安装 numpy 到当前环境获取头文件
+          pip install "numpy==${{ env.NUMPY_VERSION }}"
+          
+          # 获取 numpy 头文件路径
+          NUMPY_INC=$(python3 -c "import numpy; print(numpy.get_include())")
           DEST_DIR="${{ github.workspace }}/arm-sysroot/usr/include/numpy"
           mkdir -p "$DEST_DIR"
-          cp -r ./numpy/core/include/numpy/* "$DEST_DIR/" 2>/dev/null || true
+          cp -r "$NUMPY_INC"/* "$DEST_DIR/" 2>/dev/null || true
           echo "NUMPY_INCLUDE_DIR=$DEST_DIR" >> "$GITHUB_ENV"
+          echo "Copied numpy headers from $NUMPY_INC to $DEST_DIR"
 
       - name: Install Host Build Tools
         run: |
-          pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
-          pip install "cmake>=3.26"
+          pip install cython packaging sympy flatbuffers "cmake>=3.26"
 
       - name: Download ONNX Runtime
         run: |
@@ -185,6 +189,6 @@ jobs:
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-verified"
+          name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-fixed"
           path: "*.whl"
           retention-days: 14
