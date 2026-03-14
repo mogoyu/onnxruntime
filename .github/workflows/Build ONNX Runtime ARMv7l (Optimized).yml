@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Cross-Compile Fixed)
+name: Build onnxruntime for ARMv7l (Cross-Compile Fixed v2)
 
 on:
   workflow_dispatch:
@@ -46,28 +46,37 @@ jobs:
           pip install --upgrade pip setuptools wheel cython packaging sympy flatbuffers
           pip install "cmake>=3.26"
           pip install numpy==${{ env.NUMPY_VERSION }}
-          echo "=== CMake Version ==="
           cmake --version
 
       - name: Download and Extract ONNX Runtime
         run: |
           echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
           wget https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
+          
+          echo "=== Checking tar.gz structure BEFORE extract ==="
+          tar tzf onnxruntime-src.tar.gz | head -20
+          
           echo "=== Extracting ==="
-          tar xzf onnxruntime-src.tar.gz
-          echo "=== Finding Source Directory ==="
-          # ✅ 正确方法：查找 onnxruntime-*.tar.gz 解压后的版本目录
-          SOURCE_DIR=$(ls -d onnxruntime-${{ env.ONNXRUNTIME_VERSION }} 2>/dev/null || ls -d onnxruntime-*/ | head -1)
-          echo "Source directory: $SOURCE_DIR"
-          if [ -z "$SOURCE_DIR" ] || [ ! -d "$SOURCE_DIR" ]; then
-            echo "ERROR: Source directory not found!"
-            ls -la
+          mkdir -p onnxruntime-src
+          tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
+          
+          echo "=== Directory structure AFTER extract ==="
+          ls -la onnxruntime-src/
+          
+          echo "=== Check build.sh location ==="
+          if [ -f "onnxruntime-src/build.sh" ]; then
+            echo "✅ build.sh found in onnxruntime-src/"
+          elif [ -f "build.sh" ]; then
+            echo "⚠️ build.sh found in root directory"
+          else
+            echo "❌ build.sh NOT FOUND"
+            find . -name "build.sh" -type f
             exit 1
           fi
-          # ✅ 重命名为 onnxruntime 方便后续引用
-          mv "$SOURCE_DIR" onnxruntime
-          echo "=== Verify build.sh exists ==="
-          ls -lh onnxruntime/build.sh
+          
+          echo "=== Rename to onnxruntime ==="
+          mv onnxruntime-src onnxruntime
+          ls -la onnxruntime/build.sh
 
       - name: Create Toolchain File
         run: |
@@ -81,7 +90,6 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           EOF
-          echo "=== Toolchain File Created ==="
 
       - name: Build ONNX Runtime (Cross-Compile)
         run: |
@@ -113,7 +121,6 @@ jobs:
           find . -name "*.whl" -type f
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
-            echo "=== Wheel Files ==="
             ls -lh *.whl
           else
             echo "ERROR: No wheel file found!"
