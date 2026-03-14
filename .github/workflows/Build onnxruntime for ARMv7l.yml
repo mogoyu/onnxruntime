@@ -1,24 +1,3 @@
-name: Cross-compile ONNX Runtime for armv7 (Python 3.11)
-
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-
-jobs:
-  build-armv7-wheel:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Pull dockcross/linux-armv7 image
-        run: docker pull dockcross/linux-armv7
-
-      - name: Generate dockcross script
-        run: |
-          docker run --rm dockcross/linux-armv7 > ./dockcross
-          chmod +x ./dockcross
-
       - name: Install Python 3.11 and build tools inside container
         run: |
           ./dockcross bash -c "
@@ -36,6 +15,8 @@ jobs:
 
             # 1. 编译本机 Python（host版本，用于交叉编译过程）
             cd Python-\$PYTHON_VERSION
+            # 清除交叉编译环境变量，强制使用本机编译器
+            unset CC CXX
             ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu
             make -j\$(nproc)
             make install
@@ -50,6 +31,7 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
+            # dockcross 已经设置了正确的交叉编译器环境变量，无需手动指定 CC/CXX
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -70,49 +52,3 @@ jobs:
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
-
-      - name: Download ONNX Runtime source (v1.19.2)
-        run: |
-          ./dockcross bash -c "
-            set -e
-            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz
-            tar xzf v1.19.2.tar.gz
-          "
-
-      - name: Cross-compile ONNX Runtime and build wheel
-        id: build
-        run: |
-          ./dockcross bash -c "
-            set -e
-            cd onnxruntime-1.19.2
-
-            # 设置交叉编译必需的环境变量
-            export _PYTHON_HOST_PLATFORM=linux_armv7l
-            export PYTHON_CROSSENV=1
-            # 使用 dockcross 内置的工具链文件
-            TOOLCHAIN_FILE=/usr/share/cmake/toolchain.cmake
-
-            echo 'Using toolchain: \$TOOLCHAIN_FILE'
-            cat \$TOOLCHAIN_FILE
-
-            python3.11 tools/ci_build/build.py \
-              --build_dir build \
-              --config Release \
-              --arm \
-              --cmake_extra_defines CMAKE_TOOLCHAIN_FILE=\$TOOLCHAIN_FILE \
-              --use_openmp \
-              --build_wheel \
-              --wheel_name_suffix=-armv7 \
-              --skip_tests \
-              --parallel
-          "
-
-      - name: Copy wheel to host
-        run: |
-          ./dockcross bash -c "cp onnxruntime-1.19.2/build/Release/dist/*.whl /work/ || true"
-
-      - name: Upload wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: onnxruntime-armv7-python3.11-wheel
-          path: ./*.whl
