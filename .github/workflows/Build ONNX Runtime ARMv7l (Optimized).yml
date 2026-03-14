@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Minimal Fix)
+name: Build onnxruntime for ARMv7l (Full Error Capture)
 
 on:
   workflow_dispatch:
@@ -99,12 +99,9 @@ jobs:
       - name: Patch cpuid_info.cc (ONLY FIX - cpuinfo cross-compile issue)
         run: |
           cat > /tmp/patch_cpuid.py << 'PYEOF'
-          import re
-          
           with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "r") as f:
               content = f.read()
           
-          # 只替换 ArmLinuxInit 函数体为空实现
           old_func = '''void CPUIDInfo::ArmLinuxInit() {
           #if defined(__ANDROID__)
             // Android-specific initialization
@@ -167,10 +164,13 @@ jobs:
           echo "PYTHON_LIBRARY=$PYTHON_LIB_FILE" >> "$GITHUB_ENV"
 
       - name: Build ONNX Runtime
+        id: build_step
+        continue-on-error: true
         run: |
           cd onnxruntime
           rm -rf build/Linux
           
+          # 使用单线程确保日志完整，重定向所有输出到文件
           bash build.sh \
             --config Release \
             --update \
@@ -178,7 +178,7 @@ jobs:
             --build_wheel \
             --skip_tests \
             --enable_pybind \
-            --parallel 2 \
+            --parallel 1 \
             --allow_running_as_root \
             --skip_submodule_sync \
             --cmake_extra_defines \
@@ -204,16 +204,74 @@ jobs:
               Python3_EXECUTABLE=$(which python3) \
               Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
               Python3_LIBRARY=${PYTHON_LIBRARY} \
-            2>&1 | tee ../build.log || BUILD_FAILED=1
+            &> ../build_full.log
           
-          if [ "$BUILD_FAILED" = "1" ]; then
-            echo "=== BUILD FAILED ==="
-            tail -200 ../build.log
-            grep -i "error:" ../build.log | tail -20 || true
-            exit 1
-          fi
+          echo "build_exit_code=$?" >> $GITHUB_OUTPUT
 
-      - name: Check and Upload
+      - name: Full Error Report (If Build Failed)
+        if: steps.build_step.outcome == 'failure'
+        run: |
+          echo "=========================================="
+          echo "BUILD FAILED - Complete Diagnostic Report"
+          echo "=========================================="
+          
+          echo ""
+          echo "=== Build exit code: ${{ steps.build_step.outputs.build_exit_code }} ==="
+          
+          echo ""
+          echo "=== LAST 600 LINES OF BUILD LOG ==="
+          tail -600 build_full.log
+          
+          echo ""
+          echo "=== ALL ERROR LINES ==="
+          grep -in "error:" build_full.log | head -60 || echo "No 'error:' found"
+          
+          echo ""
+          echo "=== ALL FATAL LINES ==="
+          grep -in "fatal" build_full.log | head -30 || echo "No 'fatal' found"
+          
+          echo ""
+          echo "=== MAKEFILE ERROR CONTEXT ==="
+          grep -B10 -A5 "Error 2" build_full.log || true
+          grep -B10 -A5 "Error 1" build_full.log || true
+          
+          echo ""
+          echo "=== CMAKE ERRORS ==="
+          find onnxruntime/build -name "CMakeError.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || echo "No CMakeError.log"
+          
+          echo ""
+          echo "=== CMAKE OUTPUT (last 300 lines) ==="
+          find onnxruntime/build -name "CMakeOutput.log" -exec echo "--- {} ---" \; -exec tail -300 {} \; 2>/dev/null || echo "No CMakeOutput.log"
+          
+          echo ""
+          echo "=== CONTRIBUT OPS STATUS ==="
+          grep -i "contrib" build_full.log | tail -40 || true
+          
+          echo ""
+          echo "=== PYTHON BUILD STATUS ==="
+          grep -i "python" build_full.log | tail -40 || true
+          
+          echo ""
+          echo "=== WHEEL BUILD STATUS ==="
+          grep -i "wheel\|bdist\|setup.py" build_full.log | tail -30 || true
+          
+          echo ""
+          echo "=== LINKING STATUS ==="
+          grep -i "linking\|linker\|undefined reference" build_full.log | tail -30 || true
+          
+          echo ""
+          echo "=== BUILD DIRECTORY CONTENTS ==="
+          ls -la onnxruntime/build/Linux/Release/ || true
+          ls -la onnxruntime/build/Linux/Release/dist/ 2>/dev/null || echo "No dist directory"
+          
+          echo ""
+          echo "=== ANY .whl FILES ==="
+          find onnxruntime/build -name "*.whl" 2>/dev/null || echo "No .whl files found"
+          
+          exit 1
+
+      - name: Check and Upload (If Build Succeeded)
+        if: steps.build_step.outcome == 'success'
         run: |
           if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
             cp onnxruntime/build/Linux/Release/dist/*.whl ./
@@ -221,10 +279,12 @@ jobs:
             ls -lh *.whl
           else
             echo "No wheel found."
+            find onnxruntime/build -name "*.whl" 2>/dev/null || true
             exit 1
           fi
 
       - name: Upload Artifact
+        if: steps.build_step.outcome == 'success'
         uses: actions/upload-artifact@v4
         with:
           name: "onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l"
