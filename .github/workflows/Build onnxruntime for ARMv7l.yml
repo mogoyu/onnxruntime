@@ -51,7 +51,6 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
-            # 安装到 sysroot 下
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -72,12 +71,12 @@ jobs:
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
 
-      - name: Download ONNX Runtime source (v1.19.2)
+      - name: Download ONNX Runtime source (v1.15.0)
         run: |
           ./dockcross bash -c "
             set -e
-            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.19.2.tar.gz
-            tar xzf v1.19.2.tar.gz
+            wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v1.15.0.tar.gz
+            tar xzf v1.15.0.tar.gz
           "
 
       - name: Cross-compile ONNX Runtime and build wheel
@@ -114,7 +113,7 @@ jobs:
 
       - name: Copy wheel to host
         run: |
-          ./dockcross bash -c "cp onnxruntime-1.19.2/build/Release/dist/*.whl /work/ || true"
+          ./dockcross bash -c "cp onnxruntime-1.15.0/build/Release/dist/*.whl /work/ || true"
 
       - name: Upload wheel artifact
         uses: actions/upload-artifact@v4
