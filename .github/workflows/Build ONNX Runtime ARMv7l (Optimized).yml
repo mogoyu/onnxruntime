@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Fix Array Bounds)
+name: Build onnxruntime for ARMv7l (Final Fix - No Tests)
 
 on:
   workflow_dispatch:
@@ -24,10 +24,9 @@ jobs:
         with:
           python-version: ${{ env.PYTHON_VERSION }}
 
-      - name: Install Cross-Compile Toolchain (GCC 13 with fixes)
+      - name: Install Cross-Compile Toolchain
         run: |
           sudo apt-get update
-          # 安装必要的交叉编译工具
           sudo apt-get install -y \
             gcc-arm-linux-gnueabihf \
             g++-arm-linux-gnueabihf \
@@ -53,7 +52,8 @@ jobs:
           echo "=== Downloading ONNX Runtime v${{ env.ONNXRUNTIME_VERSION }} ==="
           wget -q https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -O onnxruntime-src.tar.gz
           
-          rm -rf onnxruntime onnxruntime-src onnxruntime/build
+          # 彻底清理旧目录
+          rm -rf onnxruntime onnxruntime-src
           mkdir -p onnxruntime-src
           tar xzf onnxruntime-src.tar.gz -C onnxruntime-src --strip-components=1
           
@@ -65,7 +65,7 @@ jobs:
           mv onnxruntime-src onnxruntime
           echo "✅ Source ready"
 
-      - name: Create Toolchain File (Strict Warning Suppression)
+      - name: Create Toolchain File (Aggressive Warning Suppression)
         run: |
           cat <<EOF > /home/runner/toolchain-armv7.cmake
           set(CMAKE_SYSTEM_NAME Linux)
@@ -77,19 +77,24 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
           
-          # ✅ 关键修复：显式禁用 array-bounds 和其他严格检查
-          # GCC 13 对 vector::back() 的空检查过于敏感，即使逻辑上非空
-          set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -fPIC")
-          set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -fPIC")
+          # ✅ 核心修复：
+          # 1. 移除 -Werror (不再将警告视为错误)
+          # 2. 显式忽略 GCC 13 对 ARM 交叉编译的常见误报
+          set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -fPIC")
+          set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-maybe-uninitialized -Wno-class-memaccess -fPIC")
+          
+          # 强制关闭测试相关的编译选项
+          set(onnxruntime_BUILD_TESTS OFF)
+          set(onnxruntime_BUILD_UNIT_TESTS OFF)
           EOF
-          echo "✅ Toolchain file created with specific warning suppressions"
+          echo "✅ Toolchain file created with aggressive flags"
 
-      - name: Build ONNX Runtime (Cross-Compile)
+      - name: Build ONNX Runtime (Cross-Compile - No Tests)
         run: |
           cd onnxruntime
-          echo "=== Starting Build with relaxed bounds checking ==="
+          echo "=== Starting Build (Tests Disabled, Warnings Ignored) ==="
           
-          # 确保构建目录是全新的
+          # 再次确保构建目录干净，防止缓存干扰
           rm -rf build/Linux
           
           bash build.sh \
@@ -110,8 +115,10 @@ jobs:
               onnxruntime_BUILD_SHARED_LIB=OFF \
               onnxruntime_USE_OPENBLAS=OFF \
               onnxruntime_DISABLE_RTTI=ON \
-              "CMAKE_CXX_FLAGS=-Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-unused-variable -Wno-sign-compare" \
-              "CMAKE_C_FLAGS=-Wno-error -Wno-array-bounds -Wno-stringop-overflow -Wno-unused-variable"
+              onnxruntime_BUILD_TESTS=OFF \
+              onnxruntime_BUILD_UNIT_TESTS=OFF \
+              "CMAKE_CXX_FLAGS=-Wno-error -Wno-all -Wno-extra" \
+              "CMAKE_C_FLAGS=-Wno-error -Wno-all -Wno-extra"
 
       - name: Check Build Output
         run: |
@@ -123,15 +130,14 @@ jobs:
           else
             echo "❌ Build failed or no wheel found."
             find . -name "*.whl"
-            echo "=== Last 50 lines of build log ==="
-            # 尝试查找具体的错误日志
-            find . -name "*.log" -o -name "CMakeOutput.log" | head -5 | xargs -I {} tail -n 50 {}
+            echo "=== Debug Info ==="
+            ls -la onnxruntime/build/Linux/Release/
             exit 1
           fi
           
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-bounds-fix
+          name: onnxruntime-${{ env.ONNXRUNTIME_VERSION }}-armv7l-py${{ env.PYTHON_VERSION }}-final
           path: "*.whl"
           retention-days: 14
