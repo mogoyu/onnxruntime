@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Full Error Capture)
+name: Build onnxruntime for ARMv7l (Fixed Patch + Correct Options)
 
 on:
   workflow_dispatch:
@@ -96,47 +96,28 @@ jobs:
           mkdir -p onnxruntime
           tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
 
-      - name: Patch cpuid_info.cc (ONLY FIX - cpuinfo cross-compile issue)
+      - name: Patch cpuid_info.cc (Use sed for reliable replacement)
         run: |
-          cat > /tmp/patch_cpuid.py << 'PYEOF'
-          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "r") as f:
-              content = f.read()
+          CPUID_FILE="onnxruntime/onnxruntime/core/common/cpuid_info.cc"
           
-          old_func = '''void CPUIDInfo::ArmLinuxInit() {
-          #if defined(__ANDROID__)
-            // Android-specific initialization
-          #else
-            // Linux ARM initialization using cpuinfo library
-            is_hybrid_ = cpuinfo_get_uarchs_count() > 1;
-            has_arm_neon_dot_ = cpuinfo_has_arm_neon_dot();
-            has_fp16_ = cpuinfo_has_arm_neon_fp16_arith();
-            const uint32_t core_cnt = cpuinfo_get_cores_count();
-            for (uint32_t c = 0; c < core_cnt; ++c) {
-              const struct cpuinfo_processor* proc = cpuinfo_get_processor(c);
-              if (!proc) continue;
-              const struct cpuinfo_core* corep = proc->core;
-              if (!corep) continue;
-              auto coreid = proc->linux_id;
-              auto uarch = corep->uarch;
-            }
-          #endif
-          }'''
+          # 使用 sed 直接替换 ArmLinuxInit 函数体
+          # 找到函数开始，替换整个函数内容为空实现
+          sed -i '/void CPUIDInfo::ArmLinuxInit()/,/^}/c\
+          void CPUIDInfo::ArmLinuxInit() {\
+            // Cross-compile: skip cpuinfo detection (cpuinfo lib not available for cross-compile)\
+            is_hybrid_ = false;\
+            has_arm_neon_dot_ = false;\
+            has_fp16_ = false;\
+          }' "$CPUID_FILE"
           
-          new_func = '''void CPUIDInfo::ArmLinuxInit() {
-            // Cross-compile: skip cpuinfo detection (cpuinfo lib not available)
-            is_hybrid_ = false;
-            has_arm_neon_dot_ = false;
-            has_fp16_ = false;
-          }'''
-          
-          content = content.replace(old_func, new_func)
-          
-          with open("onnxruntime/onnxruntime/core/common/cpuid_info.cc", "w") as f:
-              f.write(content)
-          
-          print("Patched cpuid_info.cc")
-          PYEOF
-          python3 /tmp/patch_cpuid.py
+          # 验证 patch 是否成功
+          if grep -q "cpuinfo_get_uarchs_count" "$CPUID_FILE"; then
+            echo "ERROR: Patch failed! cpuinfo functions still present"
+            exit 1
+          else
+            echo "SUCCESS: cpuid_info.cc patched successfully"
+            grep -A6 "void CPUIDInfo::ArmLinuxInit()" "$CPUID_FILE"
+          fi
 
       - name: Create Toolchain File
         run: |
@@ -170,7 +151,7 @@ jobs:
           cd onnxruntime
           rm -rf build/Linux
           
-          # 使用单线程确保日志完整，重定向所有输出到文件
+          # 关键修复：使用 onnxruntime_DISABLE_CONTRIB_OPS=ON (不是 BUILD_CONTRIB_OPS=OFF)
           bash build.sh \
             --config Release \
             --update \
@@ -191,7 +172,7 @@ jobs:
               onnxruntime_BUILD_TESTS=OFF \
               onnxruntime_BUILD_UNIT_TESTS=OFF \
               onnxruntime_ENABLE_CPUINFO=OFF \
-              onnxruntime_BUILD_CONTRIB_OPS=OFF \
+              onnxruntime_DISABLE_CONTRIB_OPS=ON \
               onnxruntime_USE_NNAPI=OFF \
               onnxruntime_USE_CUDA=OFF \
               onnxruntime_USE_TENSORRT=OFF \
@@ -214,60 +195,16 @@ jobs:
           echo "=========================================="
           echo "BUILD FAILED - Complete Diagnostic Report"
           echo "=========================================="
-          
-          echo ""
           echo "=== Build exit code: ${{ steps.build_step.outputs.build_exit_code }} ==="
-          
           echo ""
-          echo "=== LAST 600 LINES OF BUILD LOG ==="
+          echo "=== LAST 600 LINES ==="
           tail -600 build_full.log
-          
           echo ""
-          echo "=== ALL ERROR LINES ==="
-          grep -in "error:" build_full.log | head -60 || echo "No 'error:' found"
-          
+          echo "=== ALL ERRORS ==="
+          grep -in "error:" build_full.log | head -60 || echo "No errors found"
           echo ""
-          echo "=== ALL FATAL LINES ==="
-          grep -in "fatal" build_full.log | head -30 || echo "No 'fatal' found"
-          
-          echo ""
-          echo "=== MAKEFILE ERROR CONTEXT ==="
-          grep -B10 -A5 "Error 2" build_full.log || true
-          grep -B10 -A5 "Error 1" build_full.log || true
-          
-          echo ""
-          echo "=== CMAKE ERRORS ==="
-          find onnxruntime/build -name "CMakeError.log" -exec echo "--- {} ---" \; -exec cat {} \; 2>/dev/null || echo "No CMakeError.log"
-          
-          echo ""
-          echo "=== CMAKE OUTPUT (last 300 lines) ==="
-          find onnxruntime/build -name "CMakeOutput.log" -exec echo "--- {} ---" \; -exec tail -300 {} \; 2>/dev/null || echo "No CMakeOutput.log"
-          
-          echo ""
-          echo "=== CONTRIBUT OPS STATUS ==="
-          grep -i "contrib" build_full.log | tail -40 || true
-          
-          echo ""
-          echo "=== PYTHON BUILD STATUS ==="
-          grep -i "python" build_full.log | tail -40 || true
-          
-          echo ""
-          echo "=== WHEEL BUILD STATUS ==="
-          grep -i "wheel\|bdist\|setup.py" build_full.log | tail -30 || true
-          
-          echo ""
-          echo "=== LINKING STATUS ==="
-          grep -i "linking\|linker\|undefined reference" build_full.log | tail -30 || true
-          
-          echo ""
-          echo "=== BUILD DIRECTORY CONTENTS ==="
-          ls -la onnxruntime/build/Linux/Release/ || true
-          ls -la onnxruntime/build/Linux/Release/dist/ 2>/dev/null || echo "No dist directory"
-          
-          echo ""
-          echo "=== ANY .whl FILES ==="
-          find onnxruntime/build -name "*.whl" 2>/dev/null || echo "No .whl files found"
-          
+          echo "=== CMAKE CONTRIB OPS SETTING ==="
+          grep -i "contrib" build_full.log | head -20 || true
           exit 1
 
       - name: Check and Upload (If Build Succeeded)
@@ -279,7 +216,6 @@ jobs:
             ls -lh *.whl
           else
             echo "No wheel found."
-            find onnxruntime/build -name "*.whl" 2>/dev/null || true
             exit 1
           fi
 
