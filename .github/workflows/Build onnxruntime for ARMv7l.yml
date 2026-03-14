@@ -42,7 +42,6 @@ jobs:
               unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
               export CC=/usr/bin/gcc
               export CXX=/usr/bin/g++
-              # 显式使用系统 expat，确保 pyexpat 模块被编译
               ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu --with-system-expat
               make -j\$(nproc)
               make install
@@ -66,16 +65,25 @@ jobs:
               --enable-optimizations \
               --with-system-expat \
               --disable-ipv6 \
+              --with-ensurepip=no \
               ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=yes
 
             make -j\$(nproc)
+
+            # 安装前确保 PATH 优先使用本机 Python
+            export PATH=/opt/host-python/bin:\$PATH
             make install
             cd ..
-            rm -rf Python-\$PYTHON_VERSION*
 
-            # 安装 pip 和构建工具（此时 python3.11 为 armv7 可执行文件，通过 QEMU 运行）
-            python3.11 -m ensurepip --upgrade
-            python3.11 -m pip install --upgrade pip setuptools wheel
+            # 手动安装 pip 和 setuptools 到目标 Python（使用本机 Python 运行 ensurepip）
+            echo "Manually installing pip and setuptools for target Python..."
+            export PATH=/opt/host-python/bin:\$PATH
+            /opt/host-python/bin/python3.11 -m ensurepip --upgrade --root=/
+            # 验证目标 Python 能否通过 QEMU 运行
+            echo "Target Python version:"
+            /usr/local/bin/python3.11 --version
+
+            rm -rf Python-\$PYTHON_VERSION*
 
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
