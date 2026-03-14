@@ -45,11 +45,11 @@ jobs:
           echo "=== Step 4: Create Dedicated ARMHF Source File ==="
           # 创建专门的 armhf 源，只指向 ports.ubuntu.com
           sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null <<EOF
-deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
-deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
-deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
-deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
-EOF
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-updates main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-backports main restricted universe multiverse
+          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports noble-security main restricted universe multiverse
+          EOF
           
           echo "=== Step 5: Verify Remaining Sources ==="
           echo "--- /etc/apt/sources.list ---"
