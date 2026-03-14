@@ -23,21 +23,18 @@ jobs:
         run: |
           ./dockcross bash -c "
             set -e
-            # 安装编译 Python 和 ONNX Runtime 所需的依赖
             apt-get update && apt-get install -y --no-install-recommends \
               wget build-essential zlib1g-dev libncurses5-dev libgdbm-dev libnss3-dev \
               libssl-dev libreadline-dev libffi-dev libsqlite3-dev libbz2-dev \
               cmake make libexpat1-dev unzip
 
-            # 下载 Python 源码
             PYTHON_VERSION=3.11.9
             wget -q https://www.python.org/ftp/python/\$PYTHON_VERSION/Python-\$PYTHON_VERSION.tar.xz
             tar -xf Python-\$PYTHON_VERSION.tar.xz
 
-            # 1. 编译本机 Python（host版本，用于交叉编译过程）
+            # 1. 编译本机 Python
             (
               cd Python-\$PYTHON_VERSION
-              # 清除所有交叉编译环境变量，强制使用本机编译器
               unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
               export CC=/usr/bin/gcc
               export CXX=/usr/bin/g++
@@ -46,8 +43,7 @@ jobs:
               make install
             )
 
-            # 2. 交叉编译目标 Python（armv7版本）
-            # 重新解压源码以确保干净
+            # 2. 交叉编译目标 Python
             rm -rf Python-\$PYTHON_VERSION
             tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
@@ -55,7 +51,6 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
-            # dockcross 已自动设置正确的交叉编译器环境变量（CC、CXX等），无需手动干预
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -68,17 +63,11 @@ jobs:
               ac_cv_file__dev_ptmx=yes ac_cv_file__dev_ptc=yes
 
             make -j\$(nproc)
-
-            # 安装前确保 PATH 优先使用本机 Python
             export PATH=/opt/host-python/bin:\$PATH
             make install
             cd ..
 
-            # **不再安装 pip 或验证目标 Python**（避免执行目标二进制）
-            # 直接清理源码
             rm -rf Python-\$PYTHON_VERSION*
-
-            # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
           "
 
@@ -96,20 +85,17 @@ jobs:
             set -e
             cd onnxruntime-1.19.2
 
-            # 确保本机 Python 在 PATH 中优先
             export PATH=/opt/host-python/bin:\$PATH
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
 
-            # 手动下载 Eigen（避免网络校验失败）
+            # 手动下载 Eigen
             EIGEN_COMMIT=\"e7248b26a1ed53fa030c5c459f7ea095dfd276ac\"
             EIGEN_DIR=\"/opt/eigen-src\"
             mkdir -p \$EIGEN_DIR
             wget -q https://gitlab.com/libeigen/eigen/-/archive/\$EIGEN_COMMIT/eigen-\$EIGEN_COMMIT.zip -O /tmp/eigen.zip
             unzip -q /tmp/eigen.zip -d /opt
-            # 移动所有文件到目标目录
             mv /opt/eigen-\$EIGEN_COMMIT/* \$EIGEN_DIR/ 2>/dev/null || true
-            # 彻底删除原目录
             rm -rf /opt/eigen-\$EIGEN_COMMIT
             rm /tmp/eigen.zip
 
@@ -123,12 +109,15 @@ jobs:
                 CMAKE_MAKE_PROGRAM=/usr/bin/make \
                 onnxruntime_USE_OPENMP=ON \
                 FETCHCONTENT_SOURCE_DIR_EIGEN=\$EIGEN_DIR \
+                PYTHON_INCLUDE_DIR=/usr/local/include/python3.11 \
+                PYTHON_LIBRARY=/usr/local/lib/libpython3.11.so \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
               --parallel \
               --allow_running_as_root
           "
+
       - name: Copy wheel to host
         run: |
           ./dockcross bash -c "cp onnxruntime-1.19.2/build/Release/dist/*.whl /work/ || true"
