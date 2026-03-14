@@ -1,7 +1,6 @@
 name: iOS_CI_on_Mac
 
 on:
-  push:
   workflow_dispatch:
 
 concurrency:
