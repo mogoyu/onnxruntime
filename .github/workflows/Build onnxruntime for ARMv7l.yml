@@ -90,7 +90,7 @@ jobs:
             export _PYTHON_HOST_PLATFORM=linux_armv7l
             export PYTHON_CROSSENV=1
 
-            # 手动下载 Eigen（避免网络校验失败）
+            # 手动下载 Eigen
             EIGEN_COMMIT=\"e7248b26a1ed53fa030c5c459f7ea095dfd276ac\"
             EIGEN_DIR=\"/opt/eigen-src\"
             mkdir -p \$EIGEN_DIR
@@ -100,7 +100,7 @@ jobs:
             rm -rf /opt/eigen-\$EIGEN_COMMIT
             rm /tmp/eigen.zip
 
-            # 现在目标 Python 已安装到 sysroot，CMake 会自动找到它
+            # 强制指定目标 Python 库和头文件路径
             python3.11 tools/ci_build/build.py \
               --build_dir build \
               --config Release \
@@ -111,6 +111,11 @@ jobs:
                 CMAKE_MAKE_PROGRAM=/usr/bin/make \
                 onnxruntime_USE_OPENMP=ON \
                 FETCHCONTENT_SOURCE_DIR_EIGEN=\$EIGEN_DIR \
+                PYTHON_INCLUDE_DIR=/usr/armv7-unknown-linux-gnueabi/usr/include/python3.11 \
+                PYTHON_LIBRARY=/usr/armv7-unknown-linux-gnueabi/usr/lib/libpython3.11.so \
+                Python_INCLUDE_DIR=/usr/armv7-unknown-linux-gnueabi/usr/include/python3.11 \
+                Python_LIBRARY=/usr/armv7-unknown-linux-gnueabi/usr/lib/libpython3.11.so \
+                Python_EXECUTABLE=/usr/bin/python3.11 \
               --build_wheel \
               --wheel_name_suffix=-armv7 \
               --skip_tests \
