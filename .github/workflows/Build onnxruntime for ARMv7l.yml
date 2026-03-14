@@ -35,16 +35,20 @@ jobs:
             tar -xf Python-\$PYTHON_VERSION.tar.xz
 
             # 1. 编译本机 Python（host版本，用于交叉编译过程）
-            cd Python-\$PYTHON_VERSION
-            # 清除交叉编译环境变量，强制使用本机编译器
-            unset CC CXX
-            ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu
-            make -j\$(nproc)
-            make install
-            cd ..
+            # 使用子shell隔离环境，避免影响后续交叉编译
+            (
+              cd Python-\$PYTHON_VERSION
+              # 清除所有交叉编译环境变量，强制使用本机编译器
+              unset CC CXX CPP CFLAGS CXXFLAGS LDFLAGS
+              export CC=/usr/bin/gcc
+              export CXX=/usr/bin/g++
+              ./configure --prefix=/opt/host-python --build=x86_64-linux-gnu
+              make -j\$(nproc)
+              make install
+            )
 
             # 2. 交叉编译目标 Python（armv7版本）
-            # 清除之前的源码目录，重新解压以确保干净
+            # 重新解压源码以确保干净
             rm -rf Python-\$PYTHON_VERSION
             tar -xf Python-\$PYTHON_VERSION.tar.xz
             cd Python-\$PYTHON_VERSION
@@ -52,7 +56,7 @@ jobs:
             export CROSS_TRIPLE=armv7-unknown-linux-gnueabi
             export HOSTCC=gcc
             export HOSTCXX=g++
-            # dockcross 已经设置了正确的交叉编译器环境变量，无需手动指定 CC/CXX
+            # dockcross 已自动设置正确的交叉编译器环境变量（CC、CXX等），无需手动干预
             ./configure \
               --host=\$CROSS_TRIPLE \
               --build=x86_64-linux-gnu \
@@ -66,13 +70,12 @@ jobs:
             cd ..
             rm -rf Python-\$PYTHON_VERSION*
 
-            # 安装 pip 和构建工具
+            # 安装 pip 和构建工具（此时 python3.11 为 armv7 可执行文件，通过 QEMU 运行）
             python3.11 -m ensurepip --upgrade
             python3.11 -m pip install --upgrade pip setuptools wheel
 
             # 清理 apt 缓存
             apt-get clean && rm -rf /var/lib/apt/lists/*
-          "
           "
 
       - name: Download ONNX Runtime source (v1.19.2)
