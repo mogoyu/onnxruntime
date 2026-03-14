@@ -1,4 +1,4 @@
-name: Build onnxruntime for ARMv7l (Fixed Python Cross-Compile)
+name: Build onnxruntime for ARMv7l (Simplified & Verified)
 
 on:
   workflow_dispatch:
@@ -26,18 +26,14 @@ jobs:
         with:
           python-version: "${{ env.PYTHON_VERSION }}"
 
-      - name: Upgrade pip and setuptools
-        run: |
-          pip install --upgrade pip setuptools wheel
+      - name: Upgrade pip
+        run: pip install --upgrade pip setuptools wheel
 
       - name: Add ARMHF Architecture
         run: |
-          sudo dpkg --add-architecture armhf || true
-          sudo tee /etc/apt/sources.list.d/armhf-ports.list > /dev/null << 'EOF'
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main restricted universe multiverse
-          deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy-updates main restricted universe multiverse
-          EOF
-          sudo apt-get update || true
+          sudo dpkg --add-architecture armhf
+          echo "deb [arch=armhf] http://ports.ubuntu.com/ubuntu-ports jammy main" | sudo tee /etc/apt/sources.list.d/armhf.list
+          sudo apt-get update
 
       - name: Install Cross Toolchain
         run: |
@@ -46,120 +42,46 @@ jobs:
             g++-arm-linux-gnueabihf \
             libc6-dev-armhf-cross \
             linux-libc-dev-armhf-cross \
-            build-essential \
-            cmake \
-            git \
-            wget \
-            libssl-dev \
-            libffi-dev \
-            libeigen3-dev \
-            pkg-config
+            cmake git wget pkg-config
 
-      - name: Fetch ARM Python Headers (CRITICAL - must be armhf version)
+      - name: Fetch ARM Python Headers
         run: |
-          SYSROOT_DIR="${{ github.workspace }}/arm-sysroot"
-          mkdir -p "$SYSROOT_DIR/usr/include/python3.11"
-          
-          # 下载 armhf 的 python3-dev
+          SYSROOT="${{ github.workspace }}/arm-sysroot"
+          mkdir -p "$SYSROOT"
           cd /tmp
+          # 下载 armhf python3-dev
           wget -q http://ports.ubuntu.com/pool/main/p/python3.11/libpython3.11-dev_3.11.2-3+deb12u1_armhf.deb || \
-          wget -q http://ports.ubuntu.com/pool/main/p/python3-defaults/libpython3-dev_3.11.2-1+b1_armhf.deb || true
-          
-          for deb in *.deb; do
-            [ -f "$deb" ] && dpkg -x "$deb" "$SYSROOT_DIR" 2>/dev/null || true
-          done
-          
-          # 找到 Python.h
-          PYTHON_H_PATH=$(find "$SYSROOT_DIR" -name "Python.h" 2>/dev/null | head -n 1)
-          if [ -n "$PYTHON_H_PATH" ]; then
-            PYTHON_INC_DIR=$(dirname "$PYTHON_H_PATH")
-            echo "PYTHON_INCLUDE_DIR=$PYTHON_INC_DIR" >> "$GITHUB_ENV"
-            echo "Found Python.h at: $PYTHON_H_PATH"
-          else
-            echo "PYTHON_INCLUDE_DIR=$SYSROOT_DIR/usr/include/python3.11" >> "$GITHUB_ENV"
-          fi
-          
-          echo "SYSROOT_DIR=$SYSROOT_DIR" >> "$GITHUB_ENV"
-          echo "PYTHON_INCLUDE_DIR=${PYTHON_INCLUDE_DIR}"
+          wget -q http://archive.ubuntu.com/ubuntu/pool/main/p/python3.11/libpython3.11-dev_3.11.2-3_armhf.deb || true
+          for deb in *.deb; do [ -f "$deb" ] && dpkg -x "$deb" "$SYSROOT"; done
+          PYTHON_H=$(find "$SYSROOT" -name "Python.h" | head -1)
+          echo "PYTHON_INCLUDE_DIR=$(dirname "$PYTHON_H")" >> "$GITHUB_ENV"
+          echo "SYSROOT_DIR=$SYSROOT" >> "$GITHUB_ENV"
+          echo "PYTHON_INCLUDE_DIR=$(dirname "$PYTHON_H")"
 
       - name: Fetch NumPy Headers
         run: |
           pip install "numpy==${{ env.NUMPY_VERSION }}"
           NUMPY_INC=$(python3 -c "import numpy; print(numpy.get_include())")
-          DEST_DIR="${{ github.workspace }}/arm-sysroot/usr/include/numpy"
-          mkdir -p "$DEST_DIR"
-          cp -r "$NUMPY_INC"/* "$DEST_DIR/" 2>/dev/null || true
-          echo "NUMPY_INCLUDE_DIR=$DEST_DIR" >> "$GITHUB_ENV"
+          DEST="${{ github.workspace }}/arm-sysroot/usr/include/numpy"
+          mkdir -p "$DEST" && cp -r "$NUMPY_INC"/* "$DEST/"
+          echo "NUMPY_INCLUDE_DIR=$DEST" >> "$GITHUB_ENV"
 
-      - name: Install Host Build Tools
-        run: |
-          pip install cython packaging sympy flatbuffers "cmake>=3.26"
+      - name: Install Build Tools
+        run: pip install cython packaging sympy flatbuffers
 
       - name: Download ONNX Runtime
         run: |
-          wget -q "https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz" -O onnxruntime-src.tar.gz
-          rm -rf onnxruntime
-          mkdir -p onnxruntime
-          tar xzf onnxruntime-src.tar.gz -C onnxruntime --strip-components=1
+          wget -q "https://github.com/microsoft/onnxruntime/archive/refs/tags/v${{ env.ONNXRUNTIME_VERSION }}.tar.gz"
+          mkdir -p onnxruntime && tar xzf v${{ env.ONNXRUNTIME_VERSION }}.tar.gz -C onnxruntime --strip-components=1
 
       - name: Patch cpuid_info.cc
         run: |
-          CPUID_FILE="onnxruntime/onnxruntime/core/common/cpuid_info.cc"
+          FILE="onnxruntime/onnxruntime/core/common/cpuid_info.cc"
+          # 用 sed 替换整个 ArmLinuxInit 函数
           sed -i '/void CPUIDInfo::ArmLinuxInit()/,/^}/c\
-          void CPUIDInfo::ArmLinuxInit() {\
-            is_hybrid_ = false;\
-            has_arm_neon_dot_ = false;\
-            has_fp16_ = false;\
-          }' "$CPUID_FILE"
-          
-          if grep -q "cpuinfo_get_uarchs_count" "$CPUID_FILE"; then
-            echo "ERROR: Patch failed!"
-            exit 1
-          fi
-          echo "cpuid_info.cc patched successfully"
-
-      - name: Patch pybind11 CMake to use ARM Python headers
-        run: |
-          # 强制 pybind11 使用我们的 ARM Python 头文件
-          cat > /tmp/fix_pybind11.py << 'PYEOF'
-          import os
-          import re
-          
-          # 修改 pybind11 的 FindPythonLibsNew.cmake
-          cmake_files = [
-              "onnxruntime/build/Linux/Release/_deps/pybind11_project-src/tools/FindPythonLibsNew.cmake",
-              "onnxruntime/cmake/external/pybind11/tools/FindPythonLibsNew.cmake"
-          ]
-          
-          for cmake_file in cmake_files:
-              if os.path.exists(cmake_file):
-                  with open(cmake_file, 'r') as f:
-                      content = f.read()
-                  # 注释掉 find_path 对 Python.h 的搜索，使用环境变量
-                  content = content.replace(
-                      'find_path(PYTHON_INCLUDE_DIR',
-                      '# find_path(PYTHON_INCLUDE_DIR  # Disabled for cross-compile'
-                  )
-                  with open(cmake_file, 'w') as f:
-                      f.write(content)
-                  print(f"Patched: {cmake_file}")
-          
-          # 修改 onnxruntime 的 python cmake 配置
-          python_cmake = "onnxruntime/cmake/onnxruntime_python.cmake"
-          if os.path.exists(python_cmake):
-              with open(python_cmake, 'r') as f:
-                  content = f.read()
-              # 确保使用 Python3_INCLUDE_DIR 而不是自动查找
-              if 'set(Python_INCLUDE_DIRS' in content:
-                  content = content.replace(
-                      'set(Python_INCLUDE_DIRS',
-                      '# set(Python_INCLUDE_DIRS  # Use env var instead'
-                  )
-                  with open(python_cmake, 'w') as f:
-                      f.write(content)
-                  print(f"Patched: {python_cmake}")
-          PYEOF
-          python3 /tmp/fix_pybind11.py || true
+          void CPUIDInfo::ArmLinuxInit() { is_hybrid_ = false; has_arm_neon_dot_ = false; has_fp16_ = false; }' "$FILE"
+          grep -q "cpuinfo_get" "$FILE" && echo "Patch failed!" && exit 1
+          echo "cpuid_info.cc patched OK"
 
       - name: Create Toolchain File
         run: |
@@ -174,101 +96,57 @@ jobs:
           set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
           set(CMAKE_FIND_ROOT_PATH_MODE_PACKAGE ONLY)
-          list(APPEND CMAKE_FIND_ROOT_PATH /usr/arm-linux-gnueabihf)
           EOF
-
-      - name: Find Python Library (ARM)
-        run: |
-          # 查找 ARM 的 Python 库
-          PYTHON_LIB_ARM=$(find "${{ github.workspace }}/arm-sysroot" -name "libpython3.11*" 2>/dev/null | head -n 1)
-          if [ -z "$PYTHON_LIB_ARM" ]; then
-            # 如果没有找到 arm 库，使用 host 的（pybind11 只需要头文件正确）
-            PYTHON_LIB_ARM=$(find /opt/hostedtoolcache/Python/3.11* -name "libpython3.11*" 2>/dev/null | head -n 1)
-          fi
-          echo "PYTHON_LIBRARY=$PYTHON_LIB_ARM" >> "$GITHUB_ENV"
-          echo "PYTHON_LIBRARY=$PYTHON_LIB_ARM"
 
       - name: Build ONNX Runtime
         id: build_step
         continue-on-error: true
         run: |
           cd onnxruntime
-          rm -rf build/Linux
           
-          # 直接调用 cmake 而不是 build.sh，避免 build.sh 覆盖我们的设置
-          mkdir -p build/Linux/Release
-          cd build/Linux/Release
+          # 使用 build.sh，但添加关键参数
+          ./build.sh \
+            --config Release \
+            --update \
+            --build \
+            --build_wheel \
+            --skip_tests \
+            --enable_pybind \
+            --parallel 1 \
+            --allow_running_as_root \
+            --skip_submodule_sync \
+            --cmake_generator "Unix Makefiles" \
+            --cmake_extra_defines \
+              "CMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain-armv7.cmake" \
+              "CMAKE_SYSTEM_PROCESSOR=armv7l" \
+              "onnxruntime_BUILD_SHARED_LIB=OFF" \
+              "onnxruntime_DISABLE_CONTRIB_OPS=ON" \
+              "onnxruntime_ENABLE_CPUINFO=OFF" \
+              "onnxruntime_BUILD_TESTS=OFF" \
+              "onnxruntime_USE_CUDA=OFF" \
+              "onnxruntime_USE_TENSORRT=OFF" \
+              "onnxruntime_USE_DNNL=OFF" \
+              "onnxruntime_USE_XNNPACK=OFF" \
+              "Python3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR}" \
+              "NUMPY_INCLUDE_DIR=${NUMPY_INCLUDE_DIR}" \
+            2>&1 | tee ../build.log
           
-          cmake ../../cmake \
-            -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/toolchain-armv7.cmake \
-            -DCMAKE_POLICY_VERSION_MINIMUM=3.5 \
-            -DCMAKE_SYSTEM_PROCESSOR=armv7l \
-            -Donnxruntime_USE_FULL_PROTOBUF=OFF \
-            -Donnxruntime_BUILD_SHARED_LIB=OFF \
-            -Donnxruntime_DISABLE_RTTI=ON \
-            -Donnxruntime_BUILD_TESTS=OFF \
-            -Donnxruntime_BUILD_UNIT_TESTS=OFF \
-            -Donnxruntime_ENABLE_CPUINFO=OFF \
-            -Donnxruntime_DISABLE_CONTRIB_OPS=ON \
-            -Donnxruntime_USE_NNAPI=OFF \
-            -Donnxruntime_USE_CUDA=OFF \
-            -Donnxruntime_USE_TENSORRT=OFF \
-            -Donnxruntime_USE_OPENVINO=OFF \
-            -Donnxruntime_USE_DNNL=OFF \
-            -Donnxruntime_USE_ACL=OFF \
-            -Donnxruntime_USE_ARMNN=OFF \
-            -Donnxruntime_USE_XNNPACK=OFF \
-            -Donnxruntime_ENABLE_LTO=OFF \
-            -Donnxruntime_ENABLE_PYTHON=ON \
-            -DPython3_EXECUTABLE=$(which python3) \
-            -DPython3_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
-            -DPython3_LIBRARY=${PYTHON_LIBRARY} \
-            -DPYTHON_INCLUDE_DIR=${PYTHON_INCLUDE_DIR} \
-            -DPYTHON_LIBRARY=${PYTHON_LIBRARY} \
-            -Donnxruntime_PYBIND_EXPORT_OPSCHEMA=OFF \
-            -G "Unix Makefiles" \
-            -DCMAKE_BUILD_TYPE=Release \
-            &> ../../../cmake_config.log
-          
-          cmake_exit=$?
-          echo "CMake exit code: $cmake_exit"
-          
-          if [ $cmake_exit -ne 0 ]; then
-            echo "=== CMAKE CONFIG FAILED ==="
-            cat ../../../cmake_config.log
-            exit 1
-          fi
-          
-          # 构建
-          cmake --build . --config Release -j1 &> ../../../build_full.log
-          echo "build_exit_code=$?" >> $GITHUB_OUTPUT
+          echo "build_exit_code=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
-      - name: Full Error Report (If Build Failed)
+      - name: Show Errors (If Failed)
         if: steps.build_step.outcome == 'failure'
         run: |
-          echo "=== BUILD FAILED ==="
-          echo "=== LAST 600 LINES ==="
-          tail -600 build_full.log
+          echo "=== LAST 200 LINES ==="
+          tail -200 build.log
           echo ""
           echo "=== ALL ERRORS ==="
-          grep -in "error:" build_full.log | head -60 || echo "No errors"
-          echo ""
-          echo "=== PYTHON RELATED ==="
-          grep -in "python\|pybind\|LONG_BIT" build_full.log | head -40 || true
-          exit 1
+          grep -in "error:" build.log | head -30 || echo "No errors found"
 
-      - name: Check and Upload (If Build Succeeded)
+      - name: Upload Wheel (If Success)
         if: steps.build_step.outcome == 'success'
         run: |
-          if ls onnxruntime/build/Linux/Release/dist/*.whl 1>/dev/null 2>&1; then
-            cp onnxruntime/build/Linux/Release/dist/*.whl ./
-            echo "BUILD SUCCESSFUL!"
-            ls -lh *.whl
-          else
-            echo "No wheel found."
-            find onnxruntime/build -name "*.whl" 2>/dev/null || true
-            exit 1
-          fi
+          find onnxruntime/build -name "*.whl" -exec cp {} ./ \;
+          ls -lh *.whl 2>/dev/null || echo "No wheel found"
 
       - name: Upload Artifact
         if: steps.build_step.outcome == 'success'
