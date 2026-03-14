@@ -107,8 +107,10 @@ jobs:
             mkdir -p \$EIGEN_DIR
             wget -q https://gitlab.com/libeigen/eigen/-/archive/\$EIGEN_COMMIT/eigen-\$EIGEN_COMMIT.zip -O /tmp/eigen.zip
             unzip -q /tmp/eigen.zip -d /opt
-            mv /opt/eigen-\$EIGEN_COMMIT/* \$EIGEN_DIR/
-            rmdir /opt/eigen-\$EIGEN_COMMIT
+            # 移动所有文件到目标目录
+            mv /opt/eigen-\$EIGEN_COMMIT/* \$EIGEN_DIR/ 2>/dev/null || true
+            # 彻底删除原目录
+            rm -rf /opt/eigen-\$EIGEN_COMMIT
             rm /tmp/eigen.zip
 
             python3.11 tools/ci_build/build.py \
@@ -127,7 +129,6 @@ jobs:
               --parallel \
               --allow_running_as_root
           "
-
       - name: Copy wheel to host
         run: |
           ./dockcross bash -c "cp onnxruntime-1.19.2/build/Release/dist/*.whl /work/ || true"
